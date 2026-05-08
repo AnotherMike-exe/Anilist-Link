@@ -119,7 +119,16 @@ def extract_base_series_title(title: str) -> str:
     ]
 
     for pattern in patterns:
-        base = re.sub(pattern, "", base, flags=re.IGNORECASE)
+        candidate = re.sub(pattern, "", base, flags=re.IGNORECASE).strip()
+        # Reject results that strip the title down to almost nothing —
+        # for "Re:Zero kara Hajimeru Isekai Seikatsu Season 2 Part 2"
+        # the colon-greedy first pattern would otherwise leave just
+        # "Re", collapsing every Re:Zero variant into one degenerate
+        # series group. Same risk for "Steins;Gate", "Re:Creators",
+        # etc. where the prefix before the punctuation is short and
+        # part of the name proper.
+        if len(candidate) >= 4:
+            base = candidate
 
     # For titles with colons (subtitles/arcs), extract just the main title.
     # e.g. "Jujutsu Kaisen: Shimetsu Kaiyuu" -> "Jujutsu Kaisen"

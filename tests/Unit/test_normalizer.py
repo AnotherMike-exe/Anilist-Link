@@ -210,6 +210,14 @@ class TestExtractBaseSeriesTitle:
             ("Spirited Away", "Spirited Away"),
             # Season after dash
             ("Title - Season 2 Extra", "Title"),
+            # Regression: titles where the colon is part of the proper
+            # name must not be collapsed by the colon-greedy regex.
+            (
+                "Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season Part 2",
+                "Re:Zero kara Hajimeru Isekai Seikatsu",
+            ),
+            ("Re:Zero kara Hajimeru Isekai Seikatsu", "Re:Zero kara Hajimeru Isekai Seikatsu"),
+            ("Steins;Gate 0", "Steins;Gate 0"),
         ],
     )
     def test_extract_base_series_title(self, title: str, expected: str) -> None:
