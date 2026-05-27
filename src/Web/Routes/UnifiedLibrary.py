@@ -47,6 +47,8 @@ def _make_local_entry(
         "anilist_id": aid,
         "title_romaji": item.get("title_romaji") or "",
         "title_english": item.get("title_english") or "",
+        "title_native": item.get("title_native") or "",
+        "title_synonyms": item.get("title_synonyms") or "[]",
         "match_confidence": item.get("match_confidence"),
         "match_method": item.get("match_method") or "",
         "episodes": item.get("episodes"),
@@ -93,7 +95,9 @@ async def _get_local_items(db: Any) -> list[dict[str, Any]]:
                     "SELECT sge.anilist_id, sge.display_title,"
                     "       sge.format, sge.episodes, sge.start_date,"
                     "       ac.cover_image, ac.title_romaji,"
-                    "       ac.title_english, ac.year AS anilist_year"
+                    "       ac.title_english, ac.title_native,"
+                    "       ac.synonyms AS title_synonyms,"
+                    "       ac.year AS anilist_year"
                     "  FROM series_group_entries sge"
                     "  LEFT JOIN anilist_cache ac"
                     "    ON ac.anilist_id = sge.anilist_id"
@@ -117,6 +121,8 @@ async def _get_local_items(db: Any) -> list[dict[str, Any]]:
                 # virtual entry displays its own title, not the parent's.
                 virtual_entry["title_romaji"] = sge.get("title_romaji") or ""
                 virtual_entry["title_english"] = sge.get("title_english") or ""
+                virtual_entry["title_native"] = sge.get("title_native") or ""
+                virtual_entry["title_synonyms"] = sge.get("title_synonyms") or "[]"
                 virtual_entry["year"] = sge.get("anilist_year") or None
                 result.append(virtual_entry)
     return result
@@ -144,6 +150,8 @@ async def _get_plex_items(db: Any, plex_url: str = "") -> list[dict[str, Any]]:
                 "anilist_id": item.get("anilist_id"),
                 "title_romaji": item.get("title_romaji") or "",
                 "title_english": item.get("title_english") or "",
+                "title_native": item.get("title_native") or "",
+                "title_synonyms": item.get("title_synonyms") or "[]",
                 "match_confidence": item.get("match_confidence"),
                 "match_method": item.get("match_method") or "",
                 "episodes": item.get("episodes"),
@@ -177,6 +185,8 @@ async def _get_jellyfin_items(db: Any, jellyfin_url: str = "") -> list[dict[str,
                 "anilist_id": item.get("anilist_id"),
                 "title_romaji": item.get("title_romaji") or "",
                 "title_english": item.get("title_english") or "",
+                "title_native": item.get("title_native") or "",
+                "title_synonyms": item.get("title_synonyms") or "[]",
                 "match_confidence": item.get("match_confidence"),
                 "match_method": item.get("match_method") or "",
                 "episodes": item.get("episodes"),
@@ -357,6 +367,7 @@ async def library_update_match(request: Request) -> JSONResponse:
             title_romaji=title_obj.get("romaji") or "",
             title_english=title_obj.get("english") or "",
             title_native=title_obj.get("native") or "",
+            synonyms=[s for s in (entry.get("synonyms") or []) if s],
             episodes=entry.get("episodes"),
             cover_image=(entry.get("coverImage") or {}).get("large") or "",
             description=entry.get("description") or "",

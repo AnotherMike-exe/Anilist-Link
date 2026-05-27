@@ -116,6 +116,9 @@ class LocalDirectoryScanner:
                                     title_romaji=_t.get("romaji") or "",
                                     title_english=_t.get("english") or "",
                                     title_native=_t.get("native") or "",
+                                    synonyms=[
+                                        s for s in (entry.get("synonyms") or []) if s
+                                    ],
                                     episodes=entry.get("episodes"),
                                     cover_image=(
                                         (entry.get("coverImage") or {}).get("large")
@@ -287,6 +290,7 @@ class LocalDirectoryScanner:
                 title_romaji=romaji,
                 title_english=english,
                 title_native=title_obj.get("native", "") or "",
+                synonyms=[s for s in (matched_entry.get("synonyms") or []) if s],
                 episodes=anilist_episodes,
                 cover_image=cover,
                 description=matched_entry.get("description", "") or "",

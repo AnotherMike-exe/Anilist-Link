@@ -49,7 +49,7 @@
     {% set secondary_title = item.title_romaji if (title_display in ('english', 'both_english_primary') and item.title_romaji and item.title_romaji != primary_title) else (item.title_english if item.title_english and item.title_english != primary_title else '') %}
     {% if not item.anilist_id %}{% set secondary_title = 'Unmatched' %}{% endif %}
     <div class="media-card"
-         data-title="{{ (item.title or '') | lower }} {{ (item.title_romaji or '') | lower }} {{ (item.title_english or '') | lower }}"
+         data-title="{{ (item.title or '') | lower }} {{ (item.title_romaji or '') | lower }} {{ (item.title_english or '') | lower }} {{ (item.title_native or '') | lower }} {{ (item.title_synonyms or '') | lower }}"
          data-matched="{{ 'yes' if item.anilist_id else 'no' }}"
          data-source="{{ item.source }}"
          onclick="openEntryDetail({{ loop.index0 }})">
@@ -105,7 +105,7 @@
             {% set primary_title = item.title_english if (title_display in ('english', 'both_english_primary') and item.title_english) else (item.title_romaji or item.title) %}
             {% set secondary_title = item.title_romaji if (title_display in ('english', 'both_english_primary') and item.title_romaji and item.title_romaji != primary_title) else (item.title_english if item.title_english and item.title_english != primary_title else '') %}
             <tr class="library-row"
-                data-title="{{ (item.title or '') | lower }} {{ (item.title_romaji or '') | lower }} {{ (item.title_english or '') | lower }}"
+                data-title="{{ (item.title or '') | lower }} {{ (item.title_romaji or '') | lower }} {{ (item.title_english or '') | lower }} {{ (item.title_native or '') | lower }} {{ (item.title_synonyms or '') | lower }}"
                 data-matched="{{ 'yes' if item.anilist_id else 'no' }}"
                 data-source="{{ item.source }}"
                 data-sort-title="{{ (item.title_romaji or item.title or '') | lower }}"

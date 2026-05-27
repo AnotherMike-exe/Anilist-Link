@@ -217,6 +217,36 @@ class JellyfinMetadataScanner:
             ", ".join(lib.name for lib in eligible),
         )
 
+        # Orphan-folder rescue: arr-imported folders that Jellyfin classified
+        # as Type=Folder (instead of Series) are invisible to the main scan
+        # loop because get_library_shows queries Season,Movie. Write a
+        # tvshow.nfo into each, refresh, and Jellyfin promotes them so the
+        # main scan sees them as Series this pass.
+        promoted_any = False
+        for lib in eligible:
+            try:
+                count = await self._promote_orphan_folders(
+                    lib.id, results, dry_run or preview, preview, progress
+                )
+                promoted_any = promoted_any or count > 0
+            except Exception:
+                logger.exception(
+                    "Orphan-folder rescue failed for Jellyfin library %s",
+                    lib.name,
+                )
+        if promoted_any and not (dry_run or preview):
+            if progress:
+                progress.current_title = "Refreshing Jellyfin so new NFOs apply..."
+            try:
+                await self._jellyfin.refresh_library_and_wait(
+                    library_ids=[lib.id for lib in eligible]
+                )
+            except Exception:
+                logger.debug(
+                    "Jellyfin refresh-after-orphan-promotion failed",
+                    exc_info=True,
+                )
+
         library_shows: dict[str, list] = {}
         if progress:
             progress.current_title = "Counting shows..."
@@ -250,6 +280,179 @@ class JellyfinMetadataScanner:
             results.failed,
         )
         return results
+
+    async def _promote_orphan_folders(
+        self,
+        library_id: str,
+        results: ScanResults,
+        dry_run: bool,
+        preview: bool,
+        progress: ScanProgress | None,
+    ) -> int:
+        """Write tvshow.nfo into top-level Folder items so Jellyfin promotes
+        them to Series on the next scan.
+
+        Targets folders Jellyfin classified as ``Type=Folder`` (typically
+        arr-imported shows that landed before any NFO existed).  For each
+        candidate:
+
+        1. Skip if a ``tvshow.nfo`` already exists on disk.
+        2. Search AniList by folder name.
+        3. On a confident match (live mode): write the NFO with provider
+           IDs via :meth:`JellyfinClient.write_tvshow_nfo` and record a
+           ``ScanItemDetail`` so the apply path can later complete the
+           rich-metadata write.
+        4. On a confident match (preview mode): record a ``ScanItemDetail``
+           with ``reason="orphan folder — would write NFO"``.
+
+        Returns the number of folders for which an NFO was written (live)
+        or would be written (preview).
+        """
+        from src.Utils.NamingTranslator import is_movie_format
+
+        await self._ensure_path_translator()
+
+        orphans = await self._jellyfin.get_orphan_folders(library_id)
+        if not orphans:
+            return 0
+
+        logger.info(
+            "Jellyfin library %s: %d orphan Folder item(s) detected",
+            library_id,
+            len(orphans),
+        )
+
+        promoted = 0
+        for orphan in orphans:
+            item_id = orphan["Id"]
+            jf_name = orphan["Name"] or ""
+            jf_path = orphan["Path"] or ""
+            if not jf_path:
+                logger.debug("Orphan %s has no Path — skipping", item_id)
+                continue
+            if _GENERIC_FOLDER_RE.match(os.path.basename(jf_path).strip()):
+                logger.debug("Orphan %s name is generic — skipping", jf_name)
+                continue
+
+            local_path = self._jellyfin._path_translator.translate(jf_path)
+            try:
+                if os.path.exists(os.path.join(local_path, "tvshow.nfo")):
+                    logger.debug("Orphan '%s' already has tvshow.nfo", jf_name)
+                    continue
+            except OSError:
+                logger.debug("Could not check tvshow.nfo for orphan '%s'", jf_name)
+                continue
+
+            search_title = clean_title_for_search(jf_name)
+            try:
+                candidates = await self._anilist.search_anime(search_title, per_page=15)
+            except Exception:
+                logger.exception("AniList search failed for orphan '%s'", jf_name)
+                continue
+            if not candidates:
+                logger.info("Orphan '%s' — no AniList results", jf_name)
+                continue
+
+            year_hint = 0
+            year_match = re.search(r"\((\d{4})\)", jf_name)
+            if year_match:
+                year_hint = int(year_match.group(1))
+            match_result = self._matcher.find_best_match_with_season(
+                jf_name,
+                candidates,
+                target_season=1,
+                year_hint=year_hint,
+                include_all_formats=True,
+            )
+            if not match_result:
+                logger.info("Orphan '%s' — no confident AniList match", jf_name)
+                continue
+
+            matched_entry, confidence, _ = match_result
+            anilist_id = matched_entry["id"]
+            anilist_title = get_primary_title(matched_entry)
+            anilist_format = matched_entry.get("format") or ""
+            # Movies don't need tvshow.nfo — Jellyfin already classifies
+            # standalone movie files on its own.
+            if is_movie_format(anilist_format):
+                logger.debug(
+                    "Orphan '%s' matched movie %s — no tvshow.nfo needed",
+                    jf_name,
+                    anilist_id,
+                )
+                continue
+
+            if progress:
+                progress.current_title = f"Rescuing orphan: {jf_name}"
+
+            if preview:
+                results.items.append(
+                    ScanItemDetail(
+                        rating_key=item_id,
+                        plex_title=jf_name,
+                        plex_year=year_hint or None,
+                        library_title="",
+                        status="matched",
+                        reason="orphan folder — would write tvshow.nfo",
+                        anilist_id=anilist_id,
+                        anilist_title=anilist_title,
+                        confidence=confidence,
+                        match_method="orphan_promote",
+                        folder_name=jf_name,
+                    )
+                )
+                promoted += 1
+                continue
+
+            if dry_run:
+                logger.info(
+                    "[dry-run] Would write tvshow.nfo for orphan '%s' → "
+                    "AniList %d (%s)",
+                    jf_name,
+                    anilist_id,
+                    anilist_title,
+                )
+                promoted += 1
+                continue
+
+            cached = await self._db.get_cached_metadata(anilist_id) or {}
+            try:
+                await self._jellyfin.write_tvshow_nfo(
+                    item_id,
+                    anilist_title,
+                    anilist_id=anilist_id,
+                    imdb_id=cached.get("imdb_id") or None,
+                    tvdb_id=cached.get("tvdb_id") or None,
+                    tvmaze_id=cached.get("tvmaze_id") or None,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to write rescue tvshow.nfo for orphan '%s'", jf_name
+                )
+                continue
+
+            try:
+                await self._jellyfin.refresh_item_metadata(
+                    item_id, recursive=False, replace_all=False
+                )
+            except Exception:
+                logger.debug(
+                    "refresh after orphan promotion failed for '%s'",
+                    jf_name,
+                    exc_info=True,
+                )
+
+            logger.info(
+                "Promoted orphan '%s' → AniList %d (%s)",
+                jf_name,
+                anilist_id,
+                anilist_title,
+            )
+            promoted += 1
+
+        if promoted and progress:
+            progress.current_title = ""
+        return promoted
 
     async def _scan_library_shows(
         self,
@@ -1160,6 +1363,11 @@ class JellyfinMetadataScanner:
             await self._db.delete_cached_metadata(anilist_id)
 
         cached = await self._db.get_cached_metadata(anilist_id)
+        # Treat rows cached before the synonyms column was added as a miss so
+        # we backfill them on the next access — without this, the unified
+        # library search blob stays empty for synonyms even after a re-scan.
+        if cached and (cached.get("synonyms") or "[]") == "[]":
+            cached = None
         if cached:
             cached_rating = cached.get("rating")
             cached_studio = cached.get("studio") or ""
@@ -1205,6 +1413,7 @@ class JellyfinMetadataScanner:
                     "english": cached.get("title_english", ""),
                     "native": cached.get("title_native", ""),
                 },
+                "synonyms": _safe_parse_genres(cached.get("synonyms") or "[]"),
                 "episodes": cached.get("episodes"),
                 "coverImage": {"large": cached.get("cover_image", "")},
                 "description": cached.get("description", ""),
@@ -1266,6 +1475,7 @@ class JellyfinMetadataScanner:
             title_romaji=title_obj.get("romaji") or "",
             title_english=title_obj.get("english") or "",
             title_native=title_obj.get("native") or "",
+            synonyms=[s for s in (metadata.get("synonyms") or []) if s],
             episodes=metadata.get("episodes"),
             cover_image=(metadata.get("coverImage") or {}).get("large") or "",
             description=metadata.get("description") or "",

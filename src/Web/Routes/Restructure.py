@@ -1028,6 +1028,7 @@ async def restructure_rematch(request: Request) -> JSONResponse:
             title_romaji=title_obj.get("romaji") or "",
             title_english=title_obj.get("english") or "",
             title_native=title_obj.get("native") or "",
+            synonyms=[s for s in (entry.get("synonyms") or []) if s],
             episodes=entry.get("episodes"),
             cover_image=(entry.get("coverImage") or {}).get("large") or "",
             description=entry.get("description") or "",

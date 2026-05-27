@@ -23,9 +23,82 @@ logger = logging.getLogger(__name__)
 class ArrPostProcessor:
     """Moves downloaded files to AniList-structured paths and updates arr records."""
 
-    def __init__(self, db: DatabaseManager, config: AppConfig) -> None:
+    def __init__(
+        self,
+        db: DatabaseManager,
+        config: AppConfig,
+        app_state: object | None = None,
+    ) -> None:
         self._db = db
         self._config = config
+        self._app_state = app_state
+
+    def _schedule_media_server_sync(self) -> None:
+        """Queue a debounced Plex/Jellyfin refresh + metadata apply.
+
+        Called after a file is moved into the library so the media servers
+        re-index the new path and our AniList metadata (titles, posters,
+        NFO, provider IDs) is written — without this hook a *arr-imported
+        series shows up in Jellyfin as an untyped folder.
+        """
+        if self._app_state is None:
+            return
+        try:
+            from src.Download.MediaServerSync import request_arr_media_sync
+
+            request_arr_media_sync(self._app_state)
+        except Exception:
+            logger.debug("Failed to schedule post-move media sync", exc_info=True)
+
+    async def _write_show_nfo_if_missing(
+        self, local_series: str, anilist_id: int, fallback_title: str
+    ) -> None:
+        """Write a minimal tvshow.nfo into the show folder.
+
+        Mirrors the restructurer's pre-refresh NFO write so Jellyfin
+        classifies the freshly-created folder as a TV show on the next
+        scan — without this hook the folder is filed as a generic
+        ``Folder`` item and our metadata scanner never gets a chance to
+        process it.
+
+        Uses the series-group ROOT anilist_id when the entry belongs to a
+        multi-season group, so the show folder always carries the S1 IDs
+        (mirroring restructurer + scanner behaviour).  Idempotent — the
+        underlying writer overwrites with current data on every call.
+        """
+        from src.Scanner.LibraryRestructurer import _write_tvshow_nfo
+
+        if not local_series or not Path(local_series).is_dir():
+            logger.debug(
+                "Skipping tvshow.nfo write — folder %s does not exist", local_series
+            )
+            return
+
+        root_id = anilist_id
+        title = fallback_title
+        group = await self._db.get_series_group_by_anilist_id(anilist_id)
+        if group:
+            grp_root = group.get("root_anilist_id")
+            if grp_root:
+                root_id = int(grp_root)
+                root_info = await self._get_anilist_title_info(root_id)
+                if root_info.get("title"):
+                    title = root_info["title"]
+
+        cached = await self._db.get_cached_metadata(root_id) or {}
+        try:
+            _write_tvshow_nfo(
+                local_series,
+                title,
+                anilist_id=root_id,
+                imdb_id=cached.get("imdb_id") or "",
+                tvdb_id=cached.get("tvdb_id") or "",
+                tvmaze_id=cached.get("tvmaze_id") or "",
+            )
+        except Exception:
+            logger.debug(
+                "Failed to write tvshow.nfo to %s", local_series, exc_info=True
+            )
 
     # ------------------------------------------------------------------
     # Public entry points
@@ -105,6 +178,14 @@ class ArrPostProcessor:
         if not self._move_file(local_current, local_target):
             return
 
+        # Write tvshow.nfo BEFORE the media-server refresh runs so Jellyfin
+        # classifies the new folder as a Series on its next scan.  Without
+        # this, the folder lands as Type=Folder and our metadata scanner
+        # (which queries Season,Movie) skips it entirely.
+        await self._write_show_nfo_if_missing(
+            local_series, anilist_id, show_info["title"]
+        )
+
         arr_series_path = self._to_arr(local_series, arr_prefix, local_prefix)
         arr_target_path = self._to_arr(local_target, arr_prefix, local_prefix)
         relative_path = str(Path(local_target).relative_to(local_series))
@@ -132,6 +213,8 @@ class ArrPostProcessor:
             )
         finally:
             await sonarr.close()
+
+        self._schedule_media_server_sync()
 
     async def process_radarr_download(self, payload: dict[str, Any]) -> None:
         """Handle a Radarr 'Download' webhook event."""
@@ -222,6 +305,8 @@ class ArrPostProcessor:
             )
         finally:
             await radarr.close()
+
+        self._schedule_media_server_sync()
 
     # ------------------------------------------------------------------
     # Manual reprocess (existing entries)
@@ -358,6 +443,9 @@ class ArrPostProcessor:
                 }
 
             moved = skipped = errors = 0
+            # Track folders we've already written tvshow.nfo for in this run
+            # so we don't repeat the write per episode.
+            nfo_written: set[str] = set()
 
             # When a library path is configured, update the Sonarr series path once
             # upfront so it points at the correct show folder in our library.
@@ -466,6 +554,14 @@ class ArrPostProcessor:
                     continue
                 moved += 1
 
+                # Write tvshow.nfo to the show folder (once per series) so
+                # Jellyfin classifies it as a Series on the next refresh.
+                if local_series_for_file and local_series_for_file not in nfo_written:
+                    await self._write_show_nfo_if_missing(
+                        local_series_for_file, anilist_id, show_info["title"]
+                    )
+                    nfo_written.add(local_series_for_file)
+
                 # Tell Sonarr exactly where this file landed — no rescan needed.
                 arr_target_path = self._to_arr(local_target, arr_prefix, local_prefix)
                 relative_path = str(
@@ -482,6 +578,8 @@ class ArrPostProcessor:
                         exc,
                     )
 
+            if moved > 0:
+                self._schedule_media_server_sync()
             return {"ok": True, "moved": moved, "skipped": skipped, "errors": errors}
         finally:
             await sonarr.close()
@@ -637,6 +735,8 @@ class ArrPostProcessor:
                     exc,
                 )
 
+            if moved > 0:
+                self._schedule_media_server_sync()
             return {"ok": True, "moved": moved, "skipped": skipped, "errors": errors}
         finally:
             await radarr.close()

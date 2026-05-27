@@ -310,6 +310,7 @@ async def library_update_match(request: Request, library_id: int) -> JSONRespons
             title_romaji=title_obj.get("romaji", ""),
             title_english=title_obj.get("english", "") or "",
             title_native=title_obj.get("native", "") or "",
+            synonyms=[s for s in (entry.get("synonyms") or []) if s],
             episodes=entry.get("episodes"),
             cover_image=cover,
             description=entry.get("description", "") or "",

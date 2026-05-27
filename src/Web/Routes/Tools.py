@@ -5,11 +5,31 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+
+from src.Sync.CacheSynonymsBackfill import backfill_cache_synonyms
+from src.Web.App import spawn_background_task
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["tools"])
+
+
+@router.post("/api/cache/backfill-synonyms")
+async def trigger_synonyms_backfill(request: Request) -> JSONResponse:
+    """Manually kick off the anilist_cache synonyms backfill.
+
+    Fire-and-forget — returns immediately, work runs in the background and
+    can be tracked via the application log.
+    """
+    db = request.app.state.db
+    anilist_client = request.app.state.anilist_client
+    spawn_background_task(
+        request.app.state,
+        backfill_cache_synonyms(db, anilist_client),
+        task_key="cache_synonyms_backfill",
+    )
+    return JSONResponse({"ok": True, "message": "Backfill started in background"})
 
 
 @router.get("/tools", response_class=HTMLResponse)

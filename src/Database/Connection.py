@@ -270,6 +270,7 @@ class DatabaseManager:
         title_romaji: str = "",
         title_english: str = "",
         title_native: str = "",
+        synonyms: list[str] | str | None = None,
         episodes: int | None = None,
         cover_image: str = "",
         description: str = "",
@@ -282,16 +283,26 @@ class DatabaseManager:
         tvdb_id: str = "",
         tvmaze_id: str = "",
     ) -> None:
+        import json as _json
+
+        if synonyms is None:
+            synonyms_json = "[]"
+        elif isinstance(synonyms, str):
+            synonyms_json = synonyms or "[]"
+        else:
+            synonyms_json = _json.dumps([s for s in synonyms if s])
+
         await self.execute(
             """INSERT INTO anilist_cache
                    (anilist_id, title_romaji, title_english, title_native,
-                    episodes, cover_image, description, genres, status, year,
-                    rating, studio, imdb_id, tvdb_id, tvmaze_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    synonyms, episodes, cover_image, description, genres,
+                    status, year, rating, studio, imdb_id, tvdb_id, tvmaze_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(anilist_id) DO UPDATE SET
                    title_romaji=excluded.title_romaji,
                    title_english=excluded.title_english,
                    title_native=excluded.title_native,
+                   synonyms=excluded.synonyms,
                    episodes=excluded.episodes,
                    cover_image=excluded.cover_image,
                    description=excluded.description,
@@ -311,6 +322,7 @@ class DatabaseManager:
                 title_romaji or "",
                 title_english or "",
                 title_native or "",
+                synonyms_json,
                 episodes,
                 cover_image or "",
                 description or "",
@@ -738,7 +750,8 @@ class DatabaseManager:
                 pm.thumb, pm.summary, pm.library_key, pm.library_title,
                 pm.folder_name,
                 mm.anilist_id, mm.match_confidence, mm.match_method,
-                ac.title_romaji, ac.title_english, ac.cover_image,
+                ac.title_romaji, ac.title_english, ac.title_native,
+                ac.synonyms AS title_synonyms, ac.cover_image,
                 ac.episodes, ac.status AS anilist_status, ac.year AS anilist_year
             FROM plex_media pm
             LEFT JOIN media_mappings mm
@@ -992,6 +1005,7 @@ class DatabaseManager:
                    li.*,
                    COALESCE(ac.cover_image, li.cover_image) AS display_cover,
                    ac.title_romaji, ac.title_english, ac.title_native,
+                   ac.synonyms AS title_synonyms,
                    ac.description, ac.genres, ac.status AS anilist_status,
                    ac.episodes, ac.year AS anilist_year
                FROM library_items li
@@ -1252,7 +1266,8 @@ class DatabaseManager:
                 jm.item_id, jm.title AS jellyfin_title, jm.year AS jellyfin_year,
                 jm.path, jm.library_id, jm.library_name, jm.folder_name,
                 mm.anilist_id, mm.match_confidence, mm.match_method,
-                ac.title_romaji, ac.title_english, ac.cover_image,
+                ac.title_romaji, ac.title_english, ac.title_native,
+                ac.synonyms AS title_synonyms, ac.cover_image,
                 ac.episodes, ac.status AS anilist_status, ac.year AS anilist_year
             FROM jellyfin_media jm
             LEFT JOIN media_mappings mm
@@ -1335,6 +1350,8 @@ class DatabaseManager:
         anilist_title: str = "",
         title_romaji: str = "",
         title_english: str = "",
+        title_native: str = "",
+        title_synonyms: list[str] | None = None,
         anilist_format: str = "",
         anilist_episodes: int | None = None,
         cover_image: str = "",
@@ -1342,13 +1359,17 @@ class DatabaseManager:
         start_year: int | None = None,
     ) -> None:
         """Insert or update a single watchlist entry."""
+        import json as _json
+
+        synonyms_json = _json.dumps(title_synonyms or [])
         await self.execute(
             """INSERT INTO user_watchlist
                    (user_id, anilist_id, list_status, progress, score,
                     anilist_title, title_romaji, title_english,
+                    title_native, title_synonyms,
                     anilist_format, anilist_episodes,
                     cover_image, airing_status, start_year, last_synced_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                ON CONFLICT(user_id, anilist_id) DO UPDATE SET
                    list_status=excluded.list_status,
                    progress=excluded.progress,
@@ -1356,6 +1377,8 @@ class DatabaseManager:
                    anilist_title=excluded.anilist_title,
                    title_romaji=excluded.title_romaji,
                    title_english=excluded.title_english,
+                   title_native=excluded.title_native,
+                   title_synonyms=excluded.title_synonyms,
                    anilist_format=excluded.anilist_format,
                    anilist_episodes=excluded.anilist_episodes,
                    cover_image=excluded.cover_image,
@@ -1372,6 +1395,8 @@ class DatabaseManager:
                 anilist_title,
                 title_romaji,
                 title_english,
+                title_native,
+                synonyms_json,
                 anilist_format,
                 anilist_episodes,
                 cover_image,
@@ -1394,6 +1419,8 @@ class DatabaseManager:
                 anilist_title=entry.get("title", ""),
                 title_romaji=entry.get("title_romaji", ""),
                 title_english=entry.get("title_english", ""),
+                title_native=entry.get("title_native", ""),
+                title_synonyms=entry.get("title_synonyms") or [],
                 anilist_format=entry.get("format", ""),
                 anilist_episodes=entry.get("episodes"),
                 cover_image=entry.get("cover_image", ""),

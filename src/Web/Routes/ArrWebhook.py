@@ -40,7 +40,7 @@ async def sonarr_webhook(request: Request) -> JSONResponse:
         return JSONResponse({"ok": True})
 
     db = request.app.state.db
-    processor = ArrPostProcessor(db=db, config=config)
+    processor = ArrPostProcessor(db=db, config=config, app_state=request.app.state)
 
     # Fire-and-forget — respond immediately so Sonarr doesn't time out
     spawn_background_task(request.app.state, processor.process_sonarr_download(payload))
@@ -62,7 +62,7 @@ async def radarr_webhook(request: Request) -> JSONResponse:
         return JSONResponse({"ok": True})
 
     db = request.app.state.db
-    processor = ArrPostProcessor(db=db, config=config)
+    processor = ArrPostProcessor(db=db, config=config, app_state=request.app.state)
 
     spawn_background_task(request.app.state, processor.process_radarr_download(payload))
     return JSONResponse({"ok": True})

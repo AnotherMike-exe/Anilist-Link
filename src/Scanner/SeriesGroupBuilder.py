@@ -192,6 +192,7 @@ class SeriesGroupBuilder:
             title_romaji=title.get("romaji") or "",
             title_english=title.get("english") or "",
             title_native=title.get("native") or "",
+            synonyms=[s for s in (entry.get("synonyms") or []) if s],
             episodes=entry.get("episodes"),
             cover_image=cover,
             description=entry.get("description") or "",

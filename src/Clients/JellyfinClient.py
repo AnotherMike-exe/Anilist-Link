@@ -461,6 +461,45 @@ class JellyfinClient:
         except Exception:
             logger.debug("Failed to trigger image refresh for item %s", item_id)
 
+    async def get_orphan_folders(self, library_id: str) -> list[dict[str, Any]]:
+        """Return top-level ``Type=Folder`` items in a library.
+
+        These are folders Jellyfin failed to classify as ``Series`` —
+        typically because they were imported (e.g. by Sonarr) before a
+        ``tvshow.nfo`` was written, or because the folder layout doesn't
+        match Jellyfin's TV-pattern heuristic.  Used by the metadata
+        scanner's orphan-rescue pre-pass: write an NFO into each, refresh,
+        and Jellyfin promotes them to ``Series`` on the next scan.
+
+        Returns dicts with keys: ``Id``, ``Name``, ``Path``.
+        """
+        try:
+            resp = await self._http.get(
+                "/Items",
+                params={
+                    "ParentId": library_id,
+                    "IncludeItemTypes": "Folder",
+                    "Recursive": "false",
+                    "Fields": "Path,ParentId",
+                    "Limit": "5000",
+                },
+            )
+            resp.raise_for_status()
+            return [
+                {
+                    "Id": str(item.get("Id", "")),
+                    "Name": item.get("Name", "") or "",
+                    "Path": item.get("Path", "") or "",
+                }
+                for item in resp.json().get("Items", [])
+                if item.get("Id") and item.get("Type") == "Folder"
+            ]
+        except Exception as exc:
+            logger.warning(
+                "Could not fetch orphan folders for library %s: %s", library_id, exc
+            )
+            return []
+
     async def get_series_ids_in_library(self, library_id: str) -> list[str]:
         """Return the Jellyfin item IDs of all Series in a library.
 

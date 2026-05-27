@@ -14,7 +14,7 @@ from src.Database.Models import INDEXES, TABLES
 
 logger = logging.getLogger(__name__)
 
-LATEST_VERSION = 1
+LATEST_VERSION = 3
 
 
 async def run_migrations(db: aiosqlite.Connection) -> None:
@@ -24,6 +24,10 @@ async def run_migrations(db: aiosqlite.Connection) -> None:
 
     if current < 1:
         await _apply_v1(db)
+    if current < 2:
+        await _apply_v2(db)
+    if current < 3:
+        await _apply_v3(db)
 
 
 async def _get_current_version(db: aiosqlite.Connection) -> int:
@@ -52,3 +56,44 @@ async def _apply_v1(db: aiosqlite.Connection) -> None:
     await db.execute("INSERT INTO schema_version (version) VALUES (?)", (1,))
     await db.commit()
     logger.info("Migration v1 applied: 1.0 schema created successfully")
+
+
+async def _apply_v2(db: aiosqlite.Connection) -> None:
+    """Add title_native and title_synonyms columns to user_watchlist."""
+    logger.info("Applying migration v2: user_watchlist synonyms columns")
+
+    cursor = await db.execute("PRAGMA table_info(user_watchlist)")
+    cols = {row[1] for row in await cursor.fetchall()}
+
+    if "title_native" not in cols:
+        await db.execute(
+            "ALTER TABLE user_watchlist ADD COLUMN title_native TEXT"
+            " NOT NULL DEFAULT ''"
+        )
+    if "title_synonyms" not in cols:
+        await db.execute(
+            "ALTER TABLE user_watchlist ADD COLUMN title_synonyms TEXT"
+            " NOT NULL DEFAULT '[]'"
+        )
+
+    await db.execute("INSERT INTO schema_version (version) VALUES (?)", (2,))
+    await db.commit()
+    logger.info("Migration v2 applied: user_watchlist synonyms columns added")
+
+
+async def _apply_v3(db: aiosqlite.Connection) -> None:
+    """Add synonyms column to anilist_cache."""
+    logger.info("Applying migration v3: anilist_cache synonyms column")
+
+    cursor = await db.execute("PRAGMA table_info(anilist_cache)")
+    cols = {row[1] for row in await cursor.fetchall()}
+
+    if "synonyms" not in cols:
+        await db.execute(
+            "ALTER TABLE anilist_cache ADD COLUMN synonyms TEXT"
+            " NOT NULL DEFAULT '[]'"
+        )
+
+    await db.execute("INSERT INTO schema_version (version) VALUES (?)", (3,))
+    await db.commit()
+    logger.info("Migration v3 applied: anilist_cache synonyms column added")

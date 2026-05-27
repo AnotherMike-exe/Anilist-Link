@@ -152,6 +152,7 @@ class LibraryScanner:
                     title_romaji=title_obj.get("romaji", ""),
                     title_english=title_obj.get("english", "") or "",
                     title_native=title_obj.get("native", "") or "",
+                    synonyms=[s for s in (matched_entry.get("synonyms") or []) if s],
                     episodes=anilist_episodes,
                     cover_image=cover,
                     description=matched_entry.get("description", "") or "",

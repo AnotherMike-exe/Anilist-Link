@@ -173,6 +173,7 @@ query ($userId: Int) {
         media {
           id
           title { romaji english native }
+          synonyms
           format
           episodes
           status
@@ -606,6 +607,10 @@ class AniListClient:
                         ),
                         "title_romaji": title_obj.get("romaji") or "",
                         "title_english": title_obj.get("english") or "",
+                        "title_native": title_obj.get("native") or "",
+                        "title_synonyms": [
+                            s for s in (media.get("synonyms") or []) if s
+                        ],
                         "format": media.get("format", ""),
                         "episodes": media.get("episodes"),
                         "airing_status": media.get("status", ""),

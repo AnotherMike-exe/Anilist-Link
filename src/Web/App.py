@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 from src.Clients.AnilistClient import AniListClient
 from src.Database.Connection import DatabaseManager
 from src.Scheduler.Jobs import JobScheduler
+from src.Sync.CacheSynonymsBackfill import backfill_cache_synonyms
 from src.Sync.WatchlistRefresh import watchlist_activity_loop
 from src.Utils.Config import AppConfig
 from src.Web.ActivityTracker import ActivityTracker
@@ -73,6 +74,15 @@ def create_app(
 
         # Auto-register arr webhooks (fire-and-forget, non-blocking)
         asyncio.create_task(_register_arr_webhooks(config))
+
+        # One-shot backfill for anilist_cache.synonyms — runs in the
+        # background after the schema-v3 migration so existing cached rows
+        # eventually get synonyms populated without requiring users to
+        # manually re-scan every library.
+        asyncio.create_task(
+            backfill_cache_synonyms(db, anilist_client),
+            name="cache-synonyms-backfill",
+        )
 
         # Adaptive watchlist refresh loop: refreshes on startup, then every
         # `watchlist_refresh_interval_minutes` only while the dashboard has

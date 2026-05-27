@@ -173,7 +173,9 @@ async def reprocess_sonarr(
         return JSONResponse(
             {"ok": False, "error": "Sonarr not configured"}, status_code=400
         )
-    processor = ArrPostProcessor(db=request.app.state.db, config=config)
+    processor = ArrPostProcessor(
+        db=request.app.state.db, config=config, app_state=request.app.state
+    )
     result = await processor.reprocess_sonarr_series(sonarr_id, dry_run=dry_run)
     status = 200 if result.get("ok") else 500
     return JSONResponse(result, status_code=status)
@@ -189,7 +191,9 @@ async def reprocess_radarr(
         return JSONResponse(
             {"ok": False, "error": "Radarr not configured"}, status_code=400
         )
-    processor = ArrPostProcessor(db=request.app.state.db, config=config)
+    processor = ArrPostProcessor(
+        db=request.app.state.db, config=config, app_state=request.app.state
+    )
     result = await processor.reprocess_radarr_movie(radarr_id, dry_run=dry_run)
     status = 200 if result.get("ok") else 500
     return JSONResponse(result, status_code=status)

@@ -883,7 +883,10 @@ class MetadataScanner:
 
         # Check DB cache
         cached = await self._db.get_cached_metadata(anilist_id)
-        if cached:
+        # Treat rows cached before the synonyms column was added as a miss so
+        # we backfill them on the next access — without this, the unified
+        # library search blob stays empty for synonyms even after a re-scan.
+        if cached and (cached.get("synonyms") or "[]") != "[]":
             # Reconstruct the dict from cached fields
             return {
                 "id": anilist_id,
@@ -892,6 +895,7 @@ class MetadataScanner:
                     "english": cached.get("title_english", ""),
                     "native": cached.get("title_native", ""),
                 },
+                "synonyms": _safe_parse_genres(cached.get("synonyms") or "[]"),
                 "episodes": cached.get("episodes"),
                 "coverImage": {"large": cached.get("cover_image", "")},
                 "description": cached.get("description", ""),
@@ -917,6 +921,7 @@ class MetadataScanner:
             title_romaji=title_obj.get("romaji") or "",
             title_english=title_obj.get("english") or "",
             title_native=title_obj.get("native") or "",
+            synonyms=[s for s in (metadata.get("synonyms") or []) if s],
             episodes=metadata.get("episodes"),
             cover_image=(metadata.get("coverImage") or {}).get("large") or "",
             description=metadata.get("description") or "",
