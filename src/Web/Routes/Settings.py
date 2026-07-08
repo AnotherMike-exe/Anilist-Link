@@ -6,9 +6,10 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from src.Clients.AnilistClient import AniListClient
 from src.Clients.PlexClient import PlexClient
@@ -138,7 +139,16 @@ FIELD_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
             ),
             ("app.debug", "Debug logging", "checkbox"),
             ("app.title_display", "Title display", "select"),
+            (
+                "app.show_unrated_completed",
+                "Show 'Rate Your Completed Shows' card on dashboard",
+                "checkbox",
+            ),
         ],
+    ),
+    (
+        "Integrations",
+        [],
     ),
     (
         "Naming Templates & Restructuring",
@@ -323,8 +333,18 @@ async def settings_page(request: Request, saved: int = 0) -> HTMLResponse:
             "movie_output_path": display.get("library.movie_output_path", ""),
             "tv_output_path": display.get("library.tv_output_path", ""),
             "setup": request.query_params.get("setup", ""),
+            "glance_api_key": await db.get_setting("glance.api_key") or "",
         },
     )
+
+
+@router.post("/api/settings/glance-key/generate")
+async def generate_glance_key(request: Request) -> JSONResponse:
+    """Generate (or regenerate) the shared API key for the Glance integration."""
+    db = request.app.state.db
+    key = secrets.token_urlsafe(24)
+    await db.set_setting("glance.api_key", key, is_secret=True)
+    return JSONResponse({"ok": True, "api_key": key})
 
 
 @router.post("/settings")

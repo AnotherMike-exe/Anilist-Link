@@ -8,6 +8,7 @@ A self-hosted Docker container that bridges AniList with Plex, Jellyfin, and Cru
 - **Metadata** — AniList-powered metadata provider for Plex and Jellyfin anime libraries (titles, posters, summaries, genres, ratings)
 - **Watch Sync** — Sync watch progress between Crunchyroll, Plex, Jellyfin, and AniList (bidirectional for Plex/Jellyfin)
 - **Download Management** — Add anime to Sonarr/Radarr with AniList alternative titles
+- **Rate Your Completed Shows** — Dashboard nudge for AniList entries marked Completed but never rated, with one-click rating in your account's configured scale (stars, 10-point, 100-point, etc.); optional [Glance](https://github.com/glanceapp/glance) dashboard widget
 - Per-user AniList account linking via OAuth2
 - Web dashboard for configuration, mapping review, sync monitoring, and onboarding
 
@@ -89,6 +90,23 @@ Anilist-Link:  /mnt/user/media/anime → /media/anime   ← must match
 ```
 
 If you have an existing setup where your media server uses a different internal path than Anilist-Link (e.g., Plex reports `/data/anime` but your container mounts it at `/media/anime`), you can configure path prefix translation under **Settings → Library Restructuring** in the web dashboard.
+
+### Glance Integration
+
+The "Rate Your Completed Shows" card can be embedded in a [Glance](https://github.com/glanceapp/glance) dashboard as an `iframe` widget, so you can rate completed anime without leaving Glance.
+
+1. In Anilist-Link, go to **Settings → Integrations** and click **Generate key**.
+2. Click **Copy Glance snippet** and paste it into your `glance.yml`, e.g.:
+
+   ```yaml
+   - type: iframe
+     title: Rate Completed Shows
+     source: http://<your-anilist-link-host>:9876/glance/rate-completed?key=<your-key>
+     height: 300
+   ```
+3. Restart Glance. The widget lists anything marked Completed on AniList that hasn't been rated yet, and rates it directly from the tile.
+
+The key is required — `/glance/rate-completed` is the one endpoint in this app that isn't local-network-trust by default, since it's meant to be reached from outside a normal browser session. Regenerating the key from Settings invalidates the old one immediately.
 
 ### Notes
 

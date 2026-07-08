@@ -1066,6 +1066,12 @@
                         </select>
                         <div style="font-size:0.75rem;color:var(--text-muted);margin-top:0.2rem">Which title language to show as the primary title across the app</div>
                     </div>
+                    <div class="form-group">
+                        <label class="toggle">
+                            <input type="checkbox" id="ob-show-unrated-completed" {{ 'checked' if settings.show_unrated_completed != 'false' else '' }}>
+                            <span class="toggle-label">Show "Rate Your Completed Shows" card on dashboard</span>
+                        </label>
+                    </div>
                 </div>
             </div>
 
@@ -1889,6 +1895,7 @@ document.addEventListener('DOMContentLoaded', function () { NamingTemplates.init
 
         var payload = {
             title_display: (el('ob-title-display') || {}).value || 'romaji',
+            show_unrated_completed: (el('ob-show-unrated-completed') || {}).checked ? 'true' : 'false',
             scan_interval_hours: (el('ob-scan-interval') || {}).value || '24',
             library_reindex_hours: (el('ob-reindex-interval') || {}).value || '6',
             downloads_auto_statuses: statuses.join(','),

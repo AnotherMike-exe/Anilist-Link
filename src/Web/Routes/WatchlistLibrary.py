@@ -21,7 +21,7 @@ from src.Utils.NamingTranslator import (
     is_movie_format,
 )
 from src.Web.App import spawn_background_task
-from src.Web.Routes.Helpers import enrich_watchlist_entries
+from src.Web.Routes.Helpers import enrich_watchlist_entries, submit_anilist_rating
 
 logger = logging.getLogger(__name__)
 
@@ -730,6 +730,43 @@ async def get_watchlist_json(request: Request) -> JSONResponse:
 
     entries = await db.get_watchlist(user_id, list_statuses=list_statuses)
     return JSONResponse({"entries": entries, "total": len(entries)})
+
+
+@router.post("/api/watchlist/rate")
+async def rate_watchlist_entry(request: Request) -> JSONResponse:
+    """Submit a score for a watchlist entry to AniList + local cache.
+
+    Body JSON: { anilist_id, score }
+    """
+    db = request.app.state.db
+    anilist_client = request.app.state.anilist_client
+
+    body: dict[str, Any] = {}
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    anilist_id: int = int(body.get("anilist_id", 0))
+    try:
+        score = float(body.get("score", 0))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "score must be a number"}, status_code=400)
+
+    if not anilist_id:
+        return JSONResponse({"error": "anilist_id required"}, status_code=400)
+
+    users = await db.get_users_by_service("anilist")
+    if not users:
+        return JSONResponse({"error": "No linked AniList user"}, status_code=400)
+    user_row = users[0]
+
+    try:
+        await submit_anilist_rating(db, anilist_client, user_row, anilist_id, score)
+        return JSONResponse({"ok": True, "anilist_id": anilist_id, "score": score})
+    except Exception as exc:
+        logger.exception("Failed to submit rating for anilist_id=%s", anilist_id)
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 # ---------------------------------------------------------------------------

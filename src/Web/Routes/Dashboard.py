@@ -56,6 +56,21 @@ async def dashboard(
         except Exception:
             logger.warning("Could not fetch currently-watching list")
 
+    # Completed but unrated — nudge the user to rate them
+    show_unrated_completed = (
+        await db.get_setting("app.show_unrated_completed")
+    ) != "false"
+    unrated_completed: list = []
+    if anilist_user and show_unrated_completed:
+        try:
+            raw_completed = await db.get_watchlist(
+                anilist_user["user_id"], list_statuses=["COMPLETED"]
+            )
+            enriched_completed = await enrich_watchlist_entries(db, raw_completed)
+            unrated_completed = [e for e in enriched_completed if not e["score"]]
+        except Exception:
+            logger.warning("Could not fetch unrated-completed list")
+
     # Recent activity
     recent_activity: list = []
     try:
@@ -79,10 +94,13 @@ async def dashboard(
             "plex_configured": plex_configured,
             "jellyfin_configured": jellyfin_configured,
             "currently_watching": currently_watching,
+            "unrated_completed": unrated_completed,
+            "show_unrated_completed": show_unrated_completed,
             "recent_activity": recent_activity,
             "next_sync": next_sync,
             "arr_enabled": bool(config.sonarr.url or config.radarr.url),
             "title_display": await db.get_setting("app.title_display") or "romaji",
+            "score_format": await db.get_setting("anilist.score_format") or "POINT_10",
             "error": error,
             "message": request.query_params.get("message"),
             "version": "0.1.0",

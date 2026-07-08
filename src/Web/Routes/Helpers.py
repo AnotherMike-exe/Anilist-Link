@@ -109,6 +109,23 @@ def get_anilist_display_title(entry: dict[str, Any]) -> str:
     return t.get("romaji") or t.get("english") or ""
 
 
+async def submit_anilist_rating(
+    db: DatabaseManager,
+    anilist_client: Any,
+    user_row: dict[str, Any],
+    anilist_id: int,
+    score: float,
+) -> None:
+    """Write a score to AniList and mirror it into the local watchlist cache.
+
+    Shared by the dashboard rating endpoint and the Glance-facing endpoint so
+    both write through the same path instead of duplicating the mutation +
+    local-cache update.
+    """
+    await anilist_client.update_anime_score(anilist_id, user_row["access_token"], score)
+    await db.update_watchlist_score(user_row["user_id"], anilist_id, score)
+
+
 async def enrich_watchlist_entries(
     db: "DatabaseManager",
     raw_entries: list[dict[str, Any]],

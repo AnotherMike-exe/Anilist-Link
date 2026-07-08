@@ -386,9 +386,11 @@ Current tables (29):
 - `radarr_movie_cache` - Cached Radarr movie data (by TMDB ID)
 - `user_watchlist` - Cached AniList watchlist per linked user
 
+**New `app_settings` keys (Rate Your Completed Shows / Glance integration)**: `anilist.score_format`, `anilist.score_format_updated_at`, `app.show_unrated_completed`, `glance.api_key` — no new tables, `user_watchlist.score` already existed.
+
 ### Migration Strategy
 - All tables and indexes defined in `src/Database/Models.py` (TABLES, INDEXES dicts)
-- Single v1 migration creates the complete schema baseline
+- v1 creates the complete schema baseline; v2/v3 are incremental `ALTER TABLE` patches (current version: 3)
 - Database auto-creates on first run if not present
 - Migrations run automatically at startup
 
@@ -428,6 +430,9 @@ Current tables (29):
   - `GET /downloads` - Download manager UI
   - `GET /manual-grab` - Manual release grab
   - `GET /watchlist` - AniList watchlist browser
+  - `POST /api/watchlist/rate` - Submit a score for a watchlist entry (AniList + local cache)
+  - `GET /glance/rate-completed` - Key-gated iframe page for the Glance "Rate Your Completed Shows" widget
+  - `POST /glance/rate-completed/submit` - Key-gated rating submission from the Glance widget
   - `POST /arr-webhook` - Sonarr/Radarr webhook receiver
   - `POST /jellyfin/webhook` - Jellyfin webhook receiver (virtual season cleanup on TaskCompleted)
   - `GET /api/jellyfin/virtual-items` - Inspect virtual seasons (diagnostic)

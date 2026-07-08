@@ -28,9 +28,14 @@
     };
 
     var TITLE_DISPLAY = 'romaji';
+    var SCORE_FORMAT = 'POINT_10';
 
     window.setMediaDetailTitleDisplay = function (td) {
         TITLE_DISPLAY = td || 'romaji';
+    };
+
+    window.setMediaDetailScoreFormat = function (sf) {
+        SCORE_FORMAT = sf || 'POINT_10';
     };
 
     function resolveTitles(entry) {
@@ -75,8 +80,8 @@
      * Open the unified media detail modal.
      *
      * @param {Object} entry  - Media entry data
-     * @param {string} context - "dashboard" | "watchlist" | "library"
-     * @param {Object} [opts]  - { arrEnabled: bool }
+     * @param {string} context - "dashboard" | "watchlist" | "library" | "unrated"
+     * @param {Object} [opts]  - { arrEnabled: bool, onRated: function(anilistId, score) }
      */
     window.openMediaDetail = function (entry, context, opts) {
         opts = opts || {};
@@ -204,6 +209,36 @@
             return '<span class="entry-detail-label">' + esc(r[0]) + '</span>' +
                 '<span class="entry-detail-value">' + r[1] + '</span>';
         }).join('');
+
+        // ── Rating control (unrated-completed context only) ─
+        var ratingWrap = document.getElementById('mdRatingWrap');
+        if (context === 'unrated' && entry.anilist_id && typeof renderRatingControl === 'function') {
+            var ratingContainer = document.createElement('div');
+            ratingWrap.innerHTML = '<div class="entry-detail-label" style="margin-top:0.75rem">Rate this</div>';
+            ratingWrap.appendChild(ratingContainer);
+            renderRatingControl(ratingContainer, {
+                scoreFormat: SCORE_FORMAT,
+                initialScore: entry.score || 0,
+                onSubmit: function (score) {
+                    fetch('/api/watchlist/rate', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ anilist_id: entry.anilist_id, score: score })
+                    }).then(function (r) { return r.json(); }).then(function (data) {
+                        if (data.ok) {
+                            closeMediaDetail();
+                            if (typeof opts.onRated === 'function') opts.onRated(entry.anilist_id, score);
+                        } else {
+                            alert('Failed to submit rating: ' + (data.error || 'unknown error'));
+                        }
+                    }).catch(function (err) {
+                        alert('Failed to submit rating: ' + err);
+                    });
+                }
+            });
+        } else {
+            ratingWrap.innerHTML = '';
+        }
     };
 
     window.closeMediaDetail = function () {
