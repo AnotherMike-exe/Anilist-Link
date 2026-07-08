@@ -416,6 +416,18 @@ async def _settings_save_impl(request: Request) -> RedirectResponse:
     new_config = load_config_from_db_settings(db_settings)
     request.app.state.config = new_config
 
+    # React to changes in auto-download statuses.
+    old_statuses = old_config.download_sync.auto_statuses
+    new_statuses = new_config.download_sync.auto_statuses
+    if new_statuses and new_statuses != old_statuses:
+        # Clear skip cache so any previously-blocked entries are retried immediately.
+        if not old_statuses:
+            await db.execute("DELETE FROM anilist_arr_skip")
+            logger.info("Cleared anilist_arr_skip cache (auto-download enabled)")
+        # Kick off a sync run in the background so the new statuses take effect now.
+        spawn_background_task(request.app.state, request.app.state.download_sync_task())
+        logger.info("Triggered download sync after auto_statuses change")
+
     # Rebuild AniList client if credentials changed
     if (
         new_config.anilist.client_id != old_config.anilist.client_id

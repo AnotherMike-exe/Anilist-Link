@@ -1408,7 +1408,10 @@ class DatabaseManager:
     async def bulk_upsert_watchlist(
         self, user_id: str, entries: list[dict[str, Any]]
     ) -> int:
-        """Bulk upsert watchlist entries. Returns number of rows processed."""
+        """Bulk upsert watchlist entries and remove any that are no longer on AniList.
+
+        Returns number of rows processed.
+        """
         for entry in entries:
             await self.upsert_watchlist_entry(
                 user_id=user_id,
@@ -1427,6 +1430,17 @@ class DatabaseManager:
                 airing_status=entry.get("airing_status", ""),
                 start_year=entry.get("start_year"),
             )
+        # Remove entries the user deleted or removed from their AniList
+        if entries:
+            incoming_ids = tuple(e["anilist_id"] for e in entries)
+            placeholders = ",".join("?" * len(incoming_ids))
+            await self.execute(
+                f"DELETE FROM user_watchlist WHERE user_id=?"
+                f" AND anilist_id NOT IN ({placeholders})",
+                (user_id,) + incoming_ids,
+            )
+        else:
+            await self.execute("DELETE FROM user_watchlist WHERE user_id=?", (user_id,))
         return len(entries)
 
     async def get_watchlist(

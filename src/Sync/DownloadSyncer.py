@@ -189,7 +189,7 @@ class DownloadSyncer:
                         monitored=True,
                         monitor_strategy=monitor_mode,
                         search_immediately=auto_search,
-                        use_title_chain=False,
+                        use_title_chain=True,
                     )
                     if add_result.ok:
                         if add_result.service == "sonarr":
@@ -203,12 +203,12 @@ class DownloadSyncer:
                             add_result.service,
                         )
                     elif add_result.needs_disambiguation:
-                        # Can't resolve without human input — cache skip for 24h
+                        # All resolution paths exhausted — needs manual disambiguation
                         await self._cache_skip(entry_anilist_id, "no_external_id")
                         result.skipped += 1
                         logger.debug(
                             "Auto-sync skipped anilist_id=%d (%s): "
-                            "no external ID on AniList (cached 24h)",
+                            "could not resolve TVDB ID (cached 24h)",
                             entry_anilist_id,
                             title,
                         )
