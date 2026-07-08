@@ -2506,6 +2506,53 @@ a.scroll-on-hover {
     white-space: nowrap;
 }
 
+/* Rating control (dashboard "unrated" context + Glance embed) */
+.rating-control {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.35rem;
+}
+
+.rating-slider {
+    flex: 1;
+    min-width: 0;
+}
+
+.rating-readout {
+    color: var(--text);
+    font-weight: 600;
+    font-size: 0.85rem;
+    min-width: 2.5em;
+    text-align: right;
+}
+
+.rating-star, .rating-smiley {
+    cursor: pointer;
+    font-size: 1.3rem;
+    color: var(--text-muted);
+    user-select: none;
+}
+
+.rating-star {
+    color: #f9a825;
+}
+
+.rating-smiley-active {
+    filter: none;
+    color: var(--text);
+}
+
+.rating-smiley {
+    filter: grayscale(1);
+    opacity: 0.5;
+}
+
+.rating-smiley.rating-smiley-active {
+    filter: none;
+    opacity: 1;
+}
+
 /* Source chips inside info grid */
 .entry-detail-source-chip {
     display: inline-flex;

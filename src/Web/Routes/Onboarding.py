@@ -103,6 +103,8 @@ async def onboarding_page(request: Request) -> HTMLResponse:
         )
         or "6",
         "title_display": await db.get_setting("app.title_display") or "romaji",
+        "show_unrated_completed": await db.get_setting("app.show_unrated_completed")
+        or "true",
     }
 
     # Connection status flags (set after successful tests)
@@ -670,6 +672,7 @@ async def save_onboarding_settings(request: Request) -> JSONResponse:
     # Map of JSON keys -> DB setting keys
     KEY_MAP = {
         "title_display": "app.title_display",
+        "show_unrated_completed": "app.show_unrated_completed",
         "scan_interval_hours": "scheduler.scan_interval_hours",
         "library_reindex_hours": "scheduler.library_reindex_interval_hours",
         "downloads_auto_statuses": "downloads.auto_statuses",

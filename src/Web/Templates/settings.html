@@ -72,6 +72,24 @@
             <span class="text-muted" style="font-size:0.85rem">Save your Client ID and Secret below first, then reload to link your account.</span>
             {% endif %}
         </div>
+        {% elif group_name == "Integrations" %}
+        <p class="text-muted hint">Embed a "Rate Your Completed Shows" tile in <a href="https://github.com/glanceapp/glance" target="_blank" rel="noopener">Glance</a> using an <code>iframe</code> widget pointed at this key-protected URL.</p>
+        <div style="margin-bottom:0.75rem;display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+            <span id="glance-key-display" class="text-muted" style="font-family:monospace;font-size:0.85rem">{{ glance_api_key or "(no key generated yet)" }}</span>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="glanceGenerateKey()">
+                {{ "Regenerate" if glance_api_key else "Generate" }} key
+            </button>
+            {% if glance_api_key %}
+            <button type="button" class="btn btn-secondary btn-sm" onclick="glanceCopySnippet()">Copy Glance snippet</button>
+            {% endif %}
+        </div>
+        {% if glance_api_key %}
+        <textarea id="glance-snippet" class="form-control" rows="6" readonly
+                  style="font-family:monospace;font-size:0.8rem" onclick="this.select()">- type: iframe
+  title: Rate Completed Shows
+  source: {{ display['app.base_url'] }}/glance/rate-completed?key={{ glance_api_key }}
+  height: 300</textarea>
+        {% endif %}
         {% endif %}
         <div class="form-grid">
             {% for key, label, input_type in fields %}
@@ -432,6 +450,32 @@ async function migrateRootFolder(service) {
     } finally {
         btn.disabled = false;
     }
+}
+
+async function glanceGenerateKey() {
+    if (!confirm('Generate a new Glance API key? Any existing key will stop working immediately.')) {
+        return;
+    }
+    try {
+        var resp = await fetch('/api/settings/glance-key/generate', {method: 'POST'});
+        var data = await resp.json();
+        if (data.ok) {
+            location.reload();
+        } else {
+            alert('Failed to generate key: ' + (data.error || 'unknown'));
+        }
+    } catch (e) {
+        alert('Failed to generate key: ' + e.message);
+    }
+}
+
+function glanceCopySnippet() {
+    var el = document.getElementById('glance-snippet');
+    if (!el) return;
+    el.select();
+    navigator.clipboard.writeText(el.value).catch(function () {
+        document.execCommand('copy');
+    });
 }
 
 // Settings sidebar scrollspy

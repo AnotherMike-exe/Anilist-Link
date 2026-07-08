@@ -63,8 +63,8 @@ These components are used across multiple pillars and form the core infrastructu
 
 GraphQL client handling all AniList interactions:
 - **Public queries**: anime search (by title), fetch by ID, relations traversal with `relationType(version: 2)`, external links (TVDB/TMDB ID extraction)
-- **Authenticated mutations**: watch status updates (per-user OAuth2 tokens)
-- **OAuth2 flow**: authorization URL generation, token exchange, viewer profile fetch
+- **Authenticated mutations**: watch status + score updates (per-user OAuth2 tokens)
+- **OAuth2 flow**: authorization URL generation, token exchange, viewer profile fetch (also caches `Viewer.mediaListOptions.scoreFormat` at link time, self-healing refresh every 24h via `WatchlistRefresh`)
 - **Rate limiting**: token-bucket algorithm (90 capacity, 1.5/sec refill rate) — see `RateLimiter` class
 - **Retry logic**: exponential backoff on 429 and 5xx responses
 
@@ -131,6 +131,8 @@ FastAPI application with Jinja2 templates:
 - **Onboarding** (`/onboarding`): 4-step setup wizard for new users
 - **Connection Tests** (`/api/test/*`): Live connection validation for all services
 - **Floating progress widget**: In `base.html`, polls `GET /api/progress` every 2s for background task feedback
+- **Rate Your Completed Shows**: Dashboard card listing AniList `COMPLETED` entries with `score == 0`; rating submits via `SaveMediaListEntry(score)` and updates locally. Toggle: `app.show_unrated_completed` (Settings + Onboarding, default on). Shared rating control (`rating-widget.js`) adapts to the account's `scoreFormat`.
+- **Glance integration** (`/glance/rate-completed`): Standalone, iframe-sized page exposing the same unrated-completed list + rating action for embedding in a [Glance](https://github.com/glanceapp/glance) dashboard. Gated by a shared API key (`glance.api_key`) generated from Settings — the only credentialed endpoint in an otherwise local-network-trust app.
 
 ### 3.7. Scheduler (`src/Scheduler/Jobs.py`)
 
@@ -615,9 +617,7 @@ Anilist-Link/
 
 **Location**: `/config/anilist_link.db` (Docker) or `./anilist_link.db` (local dev)
 
-**Current schema version**: **1** (consolidated 1.0 baseline)
-
-All 29 tables are created in a single v1 migration. There are no incremental patches — the migration file creates the full schema baseline in one pass.
+**Current schema version**: **3** — v1 creates the full 1.0 schema baseline (29 tables); v2/v3 are small incremental `ALTER TABLE` patches (`user_watchlist.title_native`/`title_synonyms`, `anilist_cache.synonyms`).
 
 | Table | Purpose |
 |-------|---------|
@@ -651,6 +651,8 @@ All 29 tables are created in a single v1 migration. There are no incremental pat
 | `user_watchlist` | Cached AniList watchlist per linked user |
 | `watch_sync_log` | Plex/Jellyfin sync audit trail with undo support |
 
+New `app_settings` keys for the Rate Your Completed Shows / Glance feature: `anilist.score_format`, `anilist.score_format_updated_at`, `app.show_unrated_completed`, `glance.api_key` — no schema migration required, `user_watchlist.score` already existed in the v1 baseline.
+
 ### 10.2. In-Memory Cache
 
 Short-lived caching of frequently accessed data during active scan/sync operations. Rate limit state is maintained in the `RateLimiter` instance on the `AniListClient`.
@@ -671,6 +673,7 @@ Short-lived caching of frequently accessed data during active scan/sync operatio
 | qBittorrent | `QBittorrentClient` | Torrent client integration | Session cookie | ✅ Implemented |
 | TVMaze API | `TVMazeClient` | Provider ID lookups (TVDB/IMDB) | None (public) | ✅ Implemented |
 | Plex.tv API | (via `PlexClient`) | Per-user token retrieval | X-Plex-Token | Planned (P1) |
+| Glance (self-hosted dashboard) | — (HTML/JS page, `/glance/rate-completed`) | Rate completed-but-unrated shows from an external dashboard | Shared API key (query param) | ✅ Implemented |
 
 ---
 
@@ -712,6 +715,7 @@ Each pillar can function independently, but the recommended order maximizes data
 - **P4 (Manager)**: DownloadManager, MappingResolver, ArrPostProcessor, DownloadSyncer implemented.
 - **P4 (UI)**: Downloads page, manual grab, watchlist browser, Sonarr sync, webhook receiver.
 - **Infrastructure**: Onboarding wizard, connection test endpoints, floating progress widget.
+- **Rate Your Completed Shows**: Dashboard card + `SaveMediaListEntry(score)` mutation + `scoreFormat`-aware rating widget; optional toggle in Settings/Onboarding; Glance iframe integration (`/glance/rate-completed`) with shared-API-key auth.
 
 ### In Progress / Next
 
@@ -747,6 +751,7 @@ See `docker-compose.yml` and `docs/CLAUDE.md` for full Docker configuration.
 - **Plex/Jellyfin**: Token/API key authentication
 - **Arr services**: API key authentication
 - **Dashboard**: Local-only, no built-in auth (relies on network access control)
+- **Glance integration**: The one exception to the above — `/glance/*` routes require a shared API key (`glance.api_key`, generated from Settings, checked with `secrets.compare_digest`) since they're meant to be reached from outside a normal browser session
 - **Data**: OAuth tokens stored locally in SQLite; no external data sharing beyond configured platforms
 - **Code**: Parameterized queries throughout, input validation, no secrets in committed code
 

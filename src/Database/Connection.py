@@ -1458,6 +1458,15 @@ class DatabaseManager:
             (user_id, anilist_id),
         )
 
+    async def update_watchlist_score(
+        self, user_id: str, anilist_id: int, score: float
+    ) -> None:
+        """Update just the score for a single watchlist entry."""
+        await self.execute(
+            "UPDATE user_watchlist SET score=? WHERE user_id=? AND anilist_id=?",
+            (score, user_id, anilist_id),
+        )
+
     async def clear_watchlist(self, user_id: str) -> None:
         """Delete all watchlist entries for a user."""
         await self.execute("DELETE FROM user_watchlist WHERE user_id=?", (user_id,))

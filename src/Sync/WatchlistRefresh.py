@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 
 import httpx
 
@@ -19,6 +20,11 @@ logger = logging.getLogger(__name__)
 # double-refresh within a single staleness window.
 _last_refresh_at: float = 0.0
 
+# How long the cached anilist.score_format setting is trusted before we
+# re-fetch it from AniList (it rarely changes, so this is a cheap safety net
+# rather than a per-refresh cost).
+SCORE_FORMAT_TTL_HOURS = 24
+
 
 def _seconds_since_last_refresh() -> float:
     if _last_refresh_at == 0.0:
@@ -26,11 +32,49 @@ def _seconds_since_last_refresh() -> float:
     return time.monotonic() - _last_refresh_at
 
 
+async def _refresh_score_format_if_stale(
+    anilist_client: AniListClient,
+    db: DatabaseManager,
+    user: dict,
+) -> None:
+    """Re-fetch and cache the user's AniList scoreFormat if it's stale/missing."""
+    updated_at = await db.get_setting("anilist.score_format_updated_at")
+    is_stale = True
+    if updated_at:
+        try:
+            last = datetime.fromisoformat(updated_at)
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            age_hours = (datetime.now(timezone.utc) - last).total_seconds() / 3600
+            is_stale = age_hours > SCORE_FORMAT_TTL_HOURS
+        except ValueError:
+            is_stale = True
+
+    if not is_stale:
+        return
+
+    try:
+        viewer = await anilist_client.get_viewer(user["access_token"])
+        score_format = (viewer.get("mediaListOptions") or {}).get(
+            "scoreFormat", "POINT_10"
+        )
+        await db.set_setting("anilist.score_format", score_format)
+        await db.set_setting(
+            "anilist.score_format_updated_at",
+            datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception:
+        logger.warning(
+            "Failed to refresh AniList score format for user %s", user.get("user_id")
+        )
+
+
 async def _refresh_user(
     anilist_client: AniListClient,
     db: DatabaseManager,
     user: dict,
 ) -> None:
+    await _refresh_score_format_if_stale(anilist_client, db, user)
     entries = await anilist_client.get_user_watchlist(
         user["anilist_id"], user["access_token"]
     )

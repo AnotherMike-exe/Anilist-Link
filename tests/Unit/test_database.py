@@ -488,7 +488,66 @@ async def test_is_series_group_fresh(db: DatabaseManager):
 
 
 # ------------------------------------------------------------------
-# 8. Low-level helpers
+# 9. Watchlist
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_upsert_and_get_watchlist_entry(db: DatabaseManager):
+    """Round-trip a single entry via upsert_watchlist_entry/get_watchlist_entry."""
+    await db.upsert_watchlist_entry(
+        "user1", 1, list_status="CURRENT", progress=3, anilist_title="Show A"
+    )
+    entry = await db.get_watchlist_entry("user1", 1)
+    assert entry is not None
+    assert entry["list_status"] == "CURRENT"
+    assert entry["progress"] == 3
+    assert entry["anilist_title"] == "Show A"
+
+
+@pytest.mark.asyncio
+async def test_get_watchlist_filters_by_status(db: DatabaseManager):
+    """list_statuses filter should only return matching rows."""
+    await db.upsert_watchlist_entry("user1", 1, list_status="CURRENT")
+    await db.upsert_watchlist_entry("user1", 2, list_status="COMPLETED")
+    await db.upsert_watchlist_entry("user1", 3, list_status="COMPLETED")
+
+    completed = await db.get_watchlist("user1", list_statuses=["COMPLETED"])
+    assert {e["anilist_id"] for e in completed} == {2, 3}
+
+
+@pytest.mark.asyncio
+async def test_update_watchlist_score_updates_existing_entry(db: DatabaseManager):
+    """update_watchlist_score should overwrite the score for an existing row."""
+    await db.upsert_watchlist_entry("user1", 1, list_status="COMPLETED", score=0)
+    await db.update_watchlist_score("user1", 1, 8.5)
+    entry = await db.get_watchlist_entry("user1", 1)
+    assert entry["score"] == 8.5
+
+
+@pytest.mark.asyncio
+async def test_update_watchlist_score_noop_for_missing_entry(db: DatabaseManager):
+    """Calling update_watchlist_score on a nonexistent pair should not raise."""
+    await db.update_watchlist_score("user1", 999, 5.0)
+    assert await db.get_watchlist_entry("user1", 999) is None
+
+
+@pytest.mark.asyncio
+async def test_completed_unrated_filtering(db: DatabaseManager):
+    """The score == 0 filter used by the Dashboard/Glance routes should isolate
+    only unrated COMPLETED entries."""
+    await db.upsert_watchlist_entry("user1", 1, list_status="COMPLETED", score=0)
+    await db.upsert_watchlist_entry("user1", 2, list_status="COMPLETED", score=7)
+    await db.upsert_watchlist_entry("user1", 3, list_status="COMPLETED", score=0)
+    await db.upsert_watchlist_entry("user1", 4, list_status="CURRENT", score=0)
+
+    completed = await db.get_watchlist("user1", list_statuses=["COMPLETED"])
+    unrated = [e for e in completed if not e["score"]]
+    assert {e["anilist_id"] for e in unrated} == {1, 3}
+
+
+# ------------------------------------------------------------------
+# 10. Low-level helpers
 # ------------------------------------------------------------------
 
 

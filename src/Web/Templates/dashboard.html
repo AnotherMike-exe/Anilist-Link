@@ -95,6 +95,37 @@
     {% endif %}
 </section>
 
+{% if show_unrated_completed %}
+<!-- Rate Your Completed Shows -->
+<section class="card">
+    <h2>Rate Your Completed Shows</h2>
+    {% if not users %}
+    <p class="text-muted">No AniList account linked.</p>
+    {% elif not unrated_completed %}
+    <p class="text-muted">Nothing to rate — every completed show already has a score.</p>
+    {% else %}
+    <div class="media-grid" data-context="unrated" id="unratedGrid">
+        {% for entry in unrated_completed %}
+        {% set _title = entry.title_english if (title_display == 'english' and entry.title_english) else (entry.anilist_title or '(untitled)') %}
+        <div class="media-card" data-idx="{{ loop.index0 }}" data-anilist-id="{{ entry.anilist_id }}" onclick="openUnratedDetail({{ loop.index0 }})" style="cursor:pointer">
+            <div class="media-card-poster">
+                {% if entry.cover_image %}
+                <img src="{{ entry.cover_image }}" alt="{{ entry.anilist_title }}" loading="lazy">
+                {% else %}
+                <div class="media-card-poster-empty">?</div>
+                {% endif %}
+                <div class="media-card-overlay">
+                    <div class="media-card-title scroll-on-hover">{{ _title }}</div>
+                    <div class="media-card-subtitle">Completed — not yet rated</div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</section>
+{% endif %}
+
 <!-- Recent Activity (full width) -->
 <section class="card">
     <h2>Recent Activity</h2>
@@ -120,13 +151,31 @@
 
 <script>
 var _dashEntries = {{ currently_watching | tojson }};
+var _unratedEntries = {{ unrated_completed | tojson }};
 var _dashArrEnabled = {{ 'true' if arr_enabled is defined and arr_enabled else 'false' }};
 setMediaDetailTitleDisplay({{ title_display | tojson }});
+setMediaDetailScoreFormat({{ score_format | tojson }});
 
 function openDashboardDetail(idx) {
     var entry = _dashEntries[idx];
     if (!entry) return;
     openMediaDetail(entry, 'dashboard', { arrEnabled: _dashArrEnabled });
+}
+
+function openUnratedDetail(idx) {
+    var entry = _unratedEntries[idx];
+    if (!entry) return;
+    openMediaDetail(entry, 'unrated', {
+        onRated: function (anilistId) {
+            var grid = document.getElementById('unratedGrid');
+            if (!grid) return;
+            var card = grid.querySelector('[data-anilist-id="' + anilistId + '"]');
+            if (card) card.remove();
+            if (!grid.querySelector('.media-card')) {
+                grid.outerHTML = '<p class="text-muted">Nothing to rate — every completed show already has a score.</p>';
+            }
+        }
+    });
 }
 
 async function dashboardRescanLocal(btn) {
