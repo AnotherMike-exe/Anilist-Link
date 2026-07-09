@@ -347,6 +347,79 @@ async def generate_glance_key(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "api_key": key})
 
 
+# app_settings keys cleared when a media service is unlinked.
+_SERVICE_SETTING_KEYS: dict[str, tuple[str, ...]] = {
+    "plex": (
+        "plex.url",
+        "plex.token",
+        "plex.anime_library_keys",
+        "plex.watch_sync_enabled",
+    ),
+    "jellyfin": (
+        "jellyfin.url",
+        "jellyfin.api_key",
+        "jellyfin.anime_library_ids",
+        "jellyfin.watch_sync_enabled",
+    ),
+}
+
+
+@router.post("/settings/unlink/{service}")
+async def unlink_service(request: Request, service: str) -> JSONResponse:
+    """Remove a media service connection and delete all of its stored data.
+
+    Clears the service's ``app_settings`` keys and purges its DB data (mappings,
+    media snapshot, manual overrides, watch-sync log, linked users) so the app is
+    in a clean state, as if the service was never configured. Deliberately does
+    NOT touch onboarding status, AniList, the other service, or local
+    library/restructure data. Env-var-provided credentials cannot be cleared from
+    here — those are reported back so the user can remove them from the container.
+    """
+    if service not in _SERVICE_SETTING_KEYS:
+        return JSONResponse(
+            {"ok": False, "error": f"Unknown service: {service}"}, status_code=400
+        )
+
+    db = request.app.state.db
+
+    # Purge all stored data for this service (cascades sync_state via FK).
+    counts = await db.purge_service_data(service)
+
+    # Clear the service's settings keys so they fall back to defaults.
+    for key in _SERVICE_SETTING_KEYS[service]:
+        await db.execute("DELETE FROM app_settings WHERE key=?", (key,))
+
+    # Rebuild config so the cleared credentials take effect immediately.
+    db_settings = await db.get_all_settings()
+    request.app.state.config = load_config_from_db_settings(db_settings)
+
+    # Jellyfin keeps a persistent WebSocket listener — stop it on unlink.
+    if service == "jellyfin":
+        listener = getattr(request.app.state, "jellyfin_listener", None)
+        if listener is not None:
+            try:
+                await listener.stop()
+            except Exception as exc:
+                logger.warning("Failed to stop Jellyfin listener on unlink: %s", exc)
+            request.app.state.jellyfin_listener = None
+
+    # Warn if env vars still define this connection (can't be cleared from here).
+    env_overrides = get_env_overrides()
+    env_locked = sorted(k for k in _SERVICE_SETTING_KEYS[service] if k in env_overrides)
+
+    total = sum(counts.values())
+    logger.info("Unlinked %s; purged %d data rows %s", service, total, counts)
+    return JSONResponse(
+        {
+            "ok": True,
+            "service": service,
+            "deleted": counts,
+            "total_deleted": total,
+            "env_locked": env_locked,
+        }
+    )
+
+
 @router.post("/settings")
 async def settings_save(request: Request) -> RedirectResponse:
     """Save settings to DB, rebuild config, and redirect back."""

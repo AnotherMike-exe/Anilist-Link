@@ -1518,6 +1518,45 @@ class DatabaseManager:
         await self.db.commit()
         return len(rating_keys)
 
+    async def purge_service_data(self, source: str) -> dict[str, int]:
+        """Delete all stored data for a media service ('plex' or 'jellyfin').
+
+        Removes the service's media mappings (which cascade-delete matching
+        ``sync_state`` rows via FK), its media snapshot table, its manual
+        overrides, its watch-sync audit log, and its linked watch-sync users.
+        Returns per-table deletion counts.
+
+        Does NOT touch ``app_settings`` — the caller clears credentials
+        separately. Leaves shared/local data (series groups, libraries,
+        restructure logs, AniList cache) intact.
+        """
+        if source not in ("plex", "jellyfin"):
+            raise ValueError(f"Unknown media source: {source!r}")
+
+        counts: dict[str, int] = {}
+
+        cur = await self.execute("DELETE FROM media_mappings WHERE source=?", (source,))
+        counts["media_mappings"] = cur.rowcount or 0
+
+        cur = await self.execute(
+            "DELETE FROM manual_overrides WHERE source=?", (source,)
+        )
+        counts["manual_overrides"] = cur.rowcount or 0
+
+        cur = await self.execute("DELETE FROM watch_sync_log WHERE source=?", (source,))
+        counts["watch_sync_log"] = cur.rowcount or 0
+
+        if source == "plex":
+            cur = await self.execute("DELETE FROM plex_media")
+            counts["plex_media"] = cur.rowcount or 0
+            await self.clear_plex_users()
+        else:
+            cur = await self.execute("DELETE FROM jellyfin_media")
+            counts["jellyfin_media"] = cur.rowcount or 0
+            await self.clear_jellyfin_users()
+
+        return counts
+
     # ------------------------------------------------------------------
     # Crunchyroll Preview
     # ------------------------------------------------------------------

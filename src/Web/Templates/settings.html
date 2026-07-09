@@ -237,6 +237,21 @@
             </div>
             {% endfor %}
         </div>
+        {% if group_name in ("Plex", "Jellyfin") %}
+        <div style="margin-top:1.25rem;padding:0.85rem;border:1px solid var(--danger);border-radius:var(--radius)">
+            <div style="font-size:0.85rem;font-weight:600;color:var(--danger);margin-bottom:0.35rem">Danger zone</div>
+            <p class="text-muted" style="font-size:0.82rem;margin:0 0 0.6rem">
+                Unlink {{ group_name }} and permanently delete all of its stored data —
+                library mappings, AniList matches, watch-sync history, and any linked
+                users. Your media files are not touched. This cannot be undone.
+            </p>
+            <button type="button" class="btn btn-danger btn-sm"
+                    onclick="unlinkService('{{ group_name | lower }}')">
+                Unlink &amp; Remove All {{ group_name }} Data
+            </button>
+            <span id="{{ group_name | lower }}-unlink-status" style="margin-left:0.75rem;font-size:0.85rem;color:var(--text-muted)"></span>
+        </div>
+        {% endif %}
         {% if group_name == "Naming Templates & Restructuring" %}
         <div class="naming-preview" style="margin-top:1rem;padding:0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius)">
             <div class="text-muted" style="font-size:0.8rem;margin-bottom:0.5rem">Preview</div>
@@ -448,6 +463,43 @@ async function migrateRootFolder(service) {
         status.textContent = 'Error: ' + e.message;
         status.style.color = '#c62828';
     } finally {
+        btn.disabled = false;
+    }
+}
+
+async function unlinkService(service) {
+    var label = service.charAt(0).toUpperCase() + service.slice(1);
+    if (!confirm(
+        'Unlink ' + label + ' and permanently delete ALL of its data?\n\n' +
+        'This removes ' + label + ' credentials, library mappings, AniList matches, ' +
+        'watch-sync history, and linked users. Your media files are NOT touched.\n\n' +
+        'This cannot be undone.'
+    )) {
+        return;
+    }
+    var btn = event.target;
+    var status = document.getElementById(service + '-unlink-status');
+    btn.disabled = true;
+    if (status) { status.textContent = 'Removing…'; status.style.color = 'var(--text-muted)'; }
+    try {
+        var resp = await fetch('/settings/unlink/' + service, {method: 'POST'});
+        var data = await resp.json();
+        if (data.ok) {
+            if (status) { status.textContent = 'Removed ' + data.total_deleted + ' records. Reloading…'; status.style.color = 'inherit'; }
+            if (data.env_locked && data.env_locked.length) {
+                alert(
+                    label + ' data was removed, but these settings come from environment ' +
+                    'variables and must be removed from your docker-compose / container ' +
+                    'config to fully unlink:\n\n' + data.env_locked.join('\n')
+                );
+            }
+            location.reload();
+        } else {
+            if (status) { status.textContent = 'Error: ' + (data.error || 'unknown'); status.style.color = 'var(--danger)'; }
+            btn.disabled = false;
+        }
+    } catch (e) {
+        if (status) { status.textContent = 'Error: ' + e.message; status.style.color = 'var(--danger)'; }
         btn.disabled = false;
     }
 }
