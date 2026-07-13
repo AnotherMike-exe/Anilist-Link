@@ -96,15 +96,36 @@ If you have an existing setup where your media server uses a different internal 
 The "Rate Your Completed Shows" card can be embedded in a [Glance](https://github.com/glanceapp/glance) dashboard as an `iframe` widget, so you can rate completed anime without leaving Glance.
 
 1. In Anilist-Link, go to **Settings → Integrations** and click **Generate key**.
-2. Click **Copy Glance snippet** and paste it into your `glance.yml`, e.g.:
+2. Click **Copy Glance snippet** and paste it into your `glance.yml`. The snippet has two parts:
+
+   A one-time listener under the top-level `document.head` that auto-resizes the iframe to fit its content (so an empty "nothing to rate" card collapses instead of leaving a tall empty box):
+
+   ```yaml
+   document:
+     head: |
+       <script>
+       window.addEventListener('message', function (event) {
+         if (!event.data || event.data.source !== 'anilist-link-glance') return;
+         document.querySelectorAll('iframe[src*="/glance/rate-completed"]').forEach(function (frame) {
+           var h = Math.max(60, event.data.height + 20);
+           frame.style.height = h + 'px';
+           frame.setAttribute('height', h);
+         });
+       });
+       </script>
+   ```
+
+   And the widget itself, under the page/column where you want the card:
 
    ```yaml
    - type: iframe
      title: Rate Completed Shows
      source: http://<your-anilist-link-host>:9876/glance/rate-completed?key=<your-key>
-     height: 300
+     height: 60   # starting point — the script above grows/shrinks it after load
    ```
-3. Restart Glance. The widget lists anything marked Completed on AniList that hasn't been rated yet, and rates it directly from the tile.
+3. Restart Glance. The widget lists anything marked Completed on AniList that hasn't been rated yet, and rates it directly from the tile. Its background is transparent so it blends into your dashboard theme.
+
+The `document.head` listener is a one-time addition regardless of how many of these widgets you add — the `src*=` selector matches any iframe pointed at the endpoint.
 
 The key is required — `/glance/rate-completed` is the one endpoint in this app that isn't local-network-trust by default, since it's meant to be reached from outside a normal browser session. Regenerating the key from Settings invalidates the old one immediately.
 
