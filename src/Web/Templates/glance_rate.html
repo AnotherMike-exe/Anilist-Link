@@ -6,6 +6,7 @@
 <title>Rate Your Completed Shows</title>
 <link rel="stylesheet" href="/static/style.css">
 <style>
+  html, body { background: transparent !important; }
   body { padding: 0.75rem; }
   .glance-list { display: flex; flex-direction: column; gap: 0.6rem; }
   .glance-row { display: flex; gap: 0.6rem; align-items: center; background: var(--bg-card); border-radius: 6px; padding: 0.5rem; }
@@ -13,12 +14,13 @@
   .glance-info { flex: 1; min-width: 0; }
   .glance-title { font-size: 0.85rem; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .glance-row.rated { opacity: 0.45; }
+  .empty-state { display: flex; align-items: center; justify-content: center; min-height: 100%; text-align: center; color: var(--text-muted); font-size: 0.85rem; padding: 0.5rem; }
 </style>
 </head>
 <body>
 
 {% if not unrated_completed %}
-<p class="text-muted">Nothing to rate — every completed show already has a score.</p>
+<div class="empty-state"><p>Nothing to rate — every completed show already has a score.</p></div>
 {% else %}
 <div class="glance-list" id="glanceList">
   {% for entry in unrated_completed %}
@@ -64,6 +66,13 @@ document.querySelectorAll('.glance-row').forEach(function (row) {
         }
     });
 });
+</script>
+<script>
+function reportHeight() {
+  window.parent.postMessage({ source: 'anilist-link-glance', height: document.body.scrollHeight }, '*');
+}
+window.addEventListener('load', reportHeight);
+new ResizeObserver(reportHeight).observe(document.body);
 </script>
 </body>
 </html>
