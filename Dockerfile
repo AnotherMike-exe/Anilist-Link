@@ -15,9 +15,12 @@ FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# Install Chromium and chromedriver for Crunchyroll Selenium auth
+# Install Chromium and chromedriver for Crunchyroll Selenium auth.
+# gosu lets the entrypoint drop from root to PUID:PGID so files written into
+# the media library are owned by the same user as Sonarr/Radarr (not root).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium chromium-driver \
+    gosu \
     fonts-liberation \
     libnss3 \
     libxss1 \
