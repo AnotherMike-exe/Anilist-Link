@@ -239,6 +239,48 @@
         } else {
             ratingWrap.innerHTML = '';
         }
+
+        // ── Action buttons (*arr controls) ─────────────────
+        // Mirror the list-view action column so the gallery/detail popup
+        // exposes the same controls for entries tracked in Sonarr/Radarr.
+        // Each button is guarded on the page-scoped handler that backs it,
+        // so the shared modal stays inert on pages that don't define them.
+        var actionsWrap = document.getElementById('mdActions');
+        if (actionsWrap) {
+            var actHtml = '';
+            if (isTrackedInArr(entry) && entry.anilist_id &&
+                typeof openReleaseModal === 'function') {
+                actHtml += '<button class="btn btn-primary btn-xs" ' +
+                    'onclick="closeMediaDetail();openReleaseModal(' + entry.anilist_id +
+                    ',\'' + escJs(entry.anilist_title || '') + '\',\'' +
+                    escJs(entry.arr_service || '') + '\')">Search Releases</button>';
+            }
+            if (isTrackedInArr(entry) && typeof reprocessEntry === 'function') {
+                if (entry.arr_service === 'sonarr' && entry.sonarr_id) {
+                    actHtml += '<button class="btn btn-secondary btn-xs" ' +
+                        'title="Move downloaded files into your library folder" ' +
+                        'onclick="reprocessEntry(\'sonarr\',' + entry.sonarr_id +
+                        ',this,false)">Move to Library</button>';
+                    actHtml += '<button class="btn btn-secondary btn-xs" ' +
+                        'title="Preview what files would be moved and where" ' +
+                        'onclick="reprocessEntry(\'sonarr\',' + entry.sonarr_id +
+                        ',this,true)">Preview Move</button>';
+                } else if (entry.arr_service === 'radarr' && entry.radarr_id) {
+                    actHtml += '<button class="btn btn-secondary btn-xs" ' +
+                        'title="Move downloaded file into your library folder" ' +
+                        'onclick="reprocessEntry(\'radarr\',' + entry.radarr_id +
+                        ',this,false)">Move to Library</button>';
+                    actHtml += '<button class="btn btn-secondary btn-xs" ' +
+                        'title="Preview what file would be moved and where" ' +
+                        'onclick="reprocessEntry(\'radarr\',' + entry.radarr_id +
+                        ',this,true)">Preview Move</button>';
+                }
+            }
+            actionsWrap.innerHTML = actHtml
+                ? '<div style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.9rem">' +
+                    actHtml + '</div>'
+                : '';
+        }
     };
 
     window.closeMediaDetail = function () {
