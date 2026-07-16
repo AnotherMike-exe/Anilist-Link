@@ -12,6 +12,7 @@ from src.Clients.RadarrClient import RadarrClient
 from src.Clients.SonarrClient import SonarrClient
 from src.Download.ArrPostProcessor import ArrPostProcessor
 from src.Download.DownloadManager import DownloadManager
+from src.Sync.DownloadSyncer import DownloadSyncer
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,34 @@ async def download_page(request: Request) -> HTMLResponse:
             "sonarr_configured": sonarr_configured,
             "radarr_configured": radarr_configured,
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# API — manual sync trigger
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/download/sync/run")
+async def run_download_sync(request: Request) -> JSONResponse:
+    """Manually trigger a download auto-sync run outside the scheduled interval."""
+    config = request.app.state.config
+    db = request.app.state.db
+    anilist_client = request.app.state.anilist_client
+    syncer = DownloadSyncer(db, anilist_client, config)
+    try:
+        result = await syncer.run_sync()
+    except Exception as exc:
+        logger.error("Manual download sync error: %s", exc)
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    return JSONResponse(
+        {
+            "ok": True,
+            "added_to_sonarr": result.added_to_sonarr,
+            "added_to_radarr": result.added_to_radarr,
+            "skipped": result.skipped,
+            "errors": result.errors,
+        }
     )
 
 

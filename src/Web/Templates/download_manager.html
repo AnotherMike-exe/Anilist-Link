@@ -6,6 +6,10 @@
 <div class="page-header">
     <h1><img src="/static/img/sonarr.webp" alt="Sonarr" class="page-service-logo"><img src="/static/img/radarr.png" alt="Radarr" class="page-service-logo">Download Manager</h1>
     <p class="page-subtitle">Add anime to Sonarr (series) or Radarr (movies) via AniList.</p>
+    <div style="margin-top:0.75rem">
+        <button class="btn btn-secondary" id="sync-now-btn" onclick="runSyncNow()">Sync Watchlist Now</button>
+        <span id="sync-now-result" style="margin-left:0.75rem;font-size:0.9rem;color:var(--text-muted)"></span>
+    </div>
 </div>
 
 {% if not sonarr_configured and not radarr_configured %}
@@ -404,6 +408,33 @@
         toast.appendChild(copyBtn);
         document.body.appendChild(toast);
         setTimeout(() => toast.remove(), 4000);
+    }
+
+    async function runSyncNow() {
+        const btn = document.getElementById('sync-now-btn');
+        const res = document.getElementById('sync-now-result');
+        btn.disabled = true;
+        btn.textContent = 'Syncing…';
+        res.textContent = '';
+        try {
+            const r = await fetch('/api/download/sync/run', {method: 'POST'});
+            const data = await r.json();
+            if (data.ok) {
+                const added = data.added_to_sonarr + data.added_to_radarr;
+                res.style.color = added > 0 ? 'var(--success)' : 'var(--text-muted)';
+                res.textContent = added > 0
+                    ? `Added ${added} (${data.added_to_sonarr} Sonarr, ${data.added_to_radarr} Radarr) — ${data.skipped} skipped`
+                    : `No new entries added — ${data.skipped} skipped, ${data.errors} errors`;
+            } else {
+                res.style.color = 'var(--danger)';
+                res.textContent = 'Error: ' + (data.error || 'unknown');
+            }
+        } catch (e) {
+            res.style.color = 'var(--danger)';
+            res.textContent = 'Request failed';
+        }
+        btn.disabled = false;
+        btn.textContent = 'Sync Watchlist Now';
     }
 })();
 </script>

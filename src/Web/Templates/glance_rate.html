@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rate Your Completed Shows</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  html, body { background: transparent !important; }
+  body { padding: 0.75rem; }
+  .glance-list { display: flex; flex-direction: column; gap: 0.6rem; }
+  .glance-row { display: flex; gap: 0.6rem; align-items: center; background: var(--bg-card); border-radius: 6px; padding: 0.5rem; }
+  .glance-poster { width: 42px; height: 60px; object-fit: cover; border-radius: 4px; flex-shrink: 0; background: var(--bg); }
+  .glance-info { flex: 1; min-width: 0; }
+  .glance-title { font-size: 0.85rem; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .glance-row.rated { opacity: 0.45; }
+  .empty-state { display: flex; align-items: center; justify-content: center; min-height: 100%; text-align: center; color: var(--text-muted); font-size: 0.85rem; padding: 0.5rem; }
+</style>
+</head>
+<body>
+
+{% if not unrated_completed %}
+<div class="empty-state"><p>Nothing to rate — every completed show already has a score.</p></div>
+{% else %}
+<div class="glance-list" id="glanceList">
+  {% for entry in unrated_completed %}
+  <div class="glance-row" data-anilist-id="{{ entry.anilist_id }}">
+    {% if entry.cover_image %}
+    <img src="{{ entry.cover_image }}" alt="" class="glance-poster" loading="lazy">
+    {% endif %}
+    <div class="glance-info">
+      <div class="glance-title">{{ entry.anilist_title or '(untitled)' }}</div>
+      <div class="rating-container"></div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<script src="/static/rating-widget.js"></script>
+<script>
+var _key = {{ key | tojson }};
+var _scoreFormat = {{ score_format | tojson }};
+
+document.querySelectorAll('.glance-row').forEach(function (row) {
+    var anilistId = parseInt(row.getAttribute('data-anilist-id'), 10);
+    var container = row.querySelector('.rating-container');
+    renderRatingControl(container, {
+        scoreFormat: _scoreFormat,
+        initialScore: 0,
+        onSubmit: function (score) {
+            fetch('/glance/rate-completed/submit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key: _key, anilist_id: anilistId, score: score })
+            }).then(function (r) { return r.json(); }).then(function (data) {
+                if (data.ok) {
+                    row.classList.add('rated');
+                    container.innerHTML = 'Rated ' + score;
+                } else {
+                    alert('Failed to submit rating: ' + (data.error || 'unknown error'));
+                }
+            }).catch(function (err) {
+                alert('Failed to submit rating: ' + err);
+            });
+        }
+    });
+});
+</script>
+<script>
+function reportHeight() {
+  window.parent.postMessage({ source: 'anilist-link-glance', height: document.body.scrollHeight }, '*');
+}
+window.addEventListener('load', reportHeight);
+new ResizeObserver(reportHeight).observe(document.body);
+</script>
+</body>
+</html>

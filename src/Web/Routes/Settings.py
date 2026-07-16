@@ -6,9 +6,10 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from src.Clients.AnilistClient import AniListClient
 from src.Clients.PlexClient import PlexClient
@@ -138,7 +139,16 @@ FIELD_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
             ),
             ("app.debug", "Debug logging", "checkbox"),
             ("app.title_display", "Title display", "select"),
+            (
+                "app.show_unrated_completed",
+                "Show 'Rate Your Completed Shows' card on dashboard",
+                "checkbox",
+            ),
         ],
+    ),
+    (
+        "Integrations",
+        [],
     ),
     (
         "Naming Templates & Restructuring",
@@ -323,7 +333,90 @@ async def settings_page(request: Request, saved: int = 0) -> HTMLResponse:
             "movie_output_path": display.get("library.movie_output_path", ""),
             "tv_output_path": display.get("library.tv_output_path", ""),
             "setup": request.query_params.get("setup", ""),
+            "glance_api_key": await db.get_setting("glance.api_key") or "",
         },
+    )
+
+
+@router.post("/api/settings/glance-key/generate")
+async def generate_glance_key(request: Request) -> JSONResponse:
+    """Generate (or regenerate) the shared API key for the Glance integration."""
+    db = request.app.state.db
+    key = secrets.token_urlsafe(24)
+    await db.set_setting("glance.api_key", key, is_secret=True)
+    return JSONResponse({"ok": True, "api_key": key})
+
+
+# app_settings keys cleared when a media service is unlinked.
+_SERVICE_SETTING_KEYS: dict[str, tuple[str, ...]] = {
+    "plex": (
+        "plex.url",
+        "plex.token",
+        "plex.anime_library_keys",
+        "plex.watch_sync_enabled",
+    ),
+    "jellyfin": (
+        "jellyfin.url",
+        "jellyfin.api_key",
+        "jellyfin.anime_library_ids",
+        "jellyfin.watch_sync_enabled",
+    ),
+}
+
+
+@router.post("/settings/unlink/{service}")
+async def unlink_service(request: Request, service: str) -> JSONResponse:
+    """Remove a media service connection and delete all of its stored data.
+
+    Clears the service's ``app_settings`` keys and purges its DB data (mappings,
+    media snapshot, manual overrides, watch-sync log, linked users) so the app is
+    in a clean state, as if the service was never configured. Deliberately does
+    NOT touch onboarding status, AniList, the other service, or local
+    library/restructure data. Env-var-provided credentials cannot be cleared from
+    here — those are reported back so the user can remove them from the container.
+    """
+    if service not in _SERVICE_SETTING_KEYS:
+        return JSONResponse(
+            {"ok": False, "error": f"Unknown service: {service}"}, status_code=400
+        )
+
+    db = request.app.state.db
+
+    # Purge all stored data for this service (cascades sync_state via FK).
+    counts = await db.purge_service_data(service)
+
+    # Clear the service's settings keys so they fall back to defaults.
+    for key in _SERVICE_SETTING_KEYS[service]:
+        await db.execute("DELETE FROM app_settings WHERE key=?", (key,))
+
+    # Rebuild config so the cleared credentials take effect immediately.
+    db_settings = await db.get_all_settings()
+    request.app.state.config = load_config_from_db_settings(db_settings)
+
+    # Jellyfin keeps a persistent WebSocket listener — stop it on unlink.
+    if service == "jellyfin":
+        listener = getattr(request.app.state, "jellyfin_listener", None)
+        if listener is not None:
+            try:
+                await listener.stop()
+            except Exception as exc:
+                logger.warning("Failed to stop Jellyfin listener on unlink: %s", exc)
+            request.app.state.jellyfin_listener = None
+
+    # Warn if env vars still define this connection (can't be cleared from here).
+    env_overrides = get_env_overrides()
+    env_locked = sorted(k for k in _SERVICE_SETTING_KEYS[service] if k in env_overrides)
+
+    total = sum(counts.values())
+    logger.info("Unlinked %s; purged %d data rows %s", service, total, counts)
+    return JSONResponse(
+        {
+            "ok": True,
+            "service": service,
+            "deleted": counts,
+            "total_deleted": total,
+            "env_locked": env_locked,
+        }
     )
 
 
@@ -395,6 +488,18 @@ async def _settings_save_impl(request: Request) -> RedirectResponse:
     db_settings = await db.get_all_settings()
     new_config = load_config_from_db_settings(db_settings)
     request.app.state.config = new_config
+
+    # React to changes in auto-download statuses.
+    old_statuses = old_config.download_sync.auto_statuses
+    new_statuses = new_config.download_sync.auto_statuses
+    if new_statuses and new_statuses != old_statuses:
+        # Clear skip cache so any previously-blocked entries are retried immediately.
+        if not old_statuses:
+            await db.execute("DELETE FROM anilist_arr_skip")
+            logger.info("Cleared anilist_arr_skip cache (auto-download enabled)")
+        # Kick off a sync run in the background so the new statuses take effect now.
+        spawn_background_task(request.app.state, request.app.state.download_sync_task())
+        logger.info("Triggered download sync after auto_statuses change")
 
     # Rebuild AniList client if credentials changed
     if (

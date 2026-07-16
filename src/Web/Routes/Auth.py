@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import urllib.parse
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -81,6 +82,9 @@ async def anilist_callback(
         viewer = await client.get_viewer(access_token)
         anilist_id = viewer.get("id", 0)
         username = viewer.get("name", "Unknown")
+        score_format = (viewer.get("mediaListOptions") or {}).get(
+            "scoreFormat", "POINT_10"
+        )
 
         # Store user in database
         user_id = f"anilist_{anilist_id}"
@@ -91,6 +95,10 @@ async def anilist_callback(
             access_token=access_token,
             token_type=token_type,
             anilist_id=anilist_id,
+        )
+        await db.set_setting("anilist.score_format", score_format)
+        await db.set_setting(
+            "anilist.score_format_updated_at", datetime.now(timezone.utc).isoformat()
         )
 
         logger.info("Linked AniList account: %s (ID: %d)", username, anilist_id)

@@ -133,6 +133,7 @@ query {
     id
     name
     avatar { large medium }
+    mediaListOptions { scoreFormat }
   }
 }
 """
@@ -212,6 +213,16 @@ mutation ($mediaId: Int, $progress: Int, $status: MediaListStatus, $repeat: Int)
     status
     progress
     repeat
+  }
+}
+"""
+
+SET_SCORE_MUTATION = """
+mutation ($mediaId: Int, $score: Float) {
+  SaveMediaListEntry(mediaId: $mediaId, score: $score) {
+    id
+    status
+    score
   }
 }
 """
@@ -657,6 +668,15 @@ class AniListClient:
             variables["repeat"] = repeat
         data = await self._execute_query(
             UPDATE_PROGRESS_MUTATION, variables, access_token, high_priority=True
+        )
+        return data.get("SaveMediaListEntry", {})
+
+    async def update_anime_score(
+        self, anime_id: int, access_token: str, score: float
+    ) -> dict[str, Any]:
+        variables: dict[str, Any] = {"mediaId": anime_id, "score": score}
+        data = await self._execute_query(
+            SET_SCORE_MUTATION, variables, access_token, high_priority=True
         )
         return data.get("SaveMediaListEntry", {})
 

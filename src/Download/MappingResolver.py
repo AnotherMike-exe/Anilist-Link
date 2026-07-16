@@ -19,6 +19,7 @@ from src.Utils.NamingTranslator import (
     is_movie_format,
     resolve_tmdb_id,
     resolve_tvdb_id,
+    resolve_tvdb_via_prequel_chain,
     resolve_tvdb_via_title_chain,
 )
 
@@ -285,9 +286,13 @@ class MappingResolver:
                 tvdb_id: int | None = tvdb_id_override
             else:
                 tvdb_id = await resolve_tvdb_id(anilist_id, self._anilist)
+                if not tvdb_id:
+                    # Walk the prequel chain — S1 often carries the TVDB link
+                    tvdb_id, _ = await resolve_tvdb_via_prequel_chain(
+                        anilist_id, self._anilist
+                    )
                 if not tvdb_id and use_title_chain and self._sonarr:
-                    # External link missing — try title chain against Sonarr
-                    # (only for manual adds; auto-sync passes use_title_chain=False)
+                    # Last resort: fuzzy title search against Sonarr (≥90% confidence)
                     tvdb_id, candidates = await resolve_tvdb_via_title_chain(
                         anilist_id, self._anilist, self._sonarr
                     )

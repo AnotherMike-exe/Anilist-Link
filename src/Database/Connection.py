@@ -1408,7 +1408,10 @@ class DatabaseManager:
     async def bulk_upsert_watchlist(
         self, user_id: str, entries: list[dict[str, Any]]
     ) -> int:
-        """Bulk upsert watchlist entries. Returns number of rows processed."""
+        """Bulk upsert watchlist entries and remove any that are no longer on AniList.
+
+        Returns number of rows processed.
+        """
         for entry in entries:
             await self.upsert_watchlist_entry(
                 user_id=user_id,
@@ -1427,6 +1430,17 @@ class DatabaseManager:
                 airing_status=entry.get("airing_status", ""),
                 start_year=entry.get("start_year"),
             )
+        # Remove entries the user deleted or removed from their AniList
+        if entries:
+            incoming_ids = tuple(e["anilist_id"] for e in entries)
+            placeholders = ",".join("?" * len(incoming_ids))
+            await self.execute(
+                f"DELETE FROM user_watchlist WHERE user_id=?"
+                f" AND anilist_id NOT IN ({placeholders})",
+                (user_id,) + incoming_ids,
+            )
+        else:
+            await self.execute("DELETE FROM user_watchlist WHERE user_id=?", (user_id,))
         return len(entries)
 
     async def get_watchlist(
@@ -1456,6 +1470,15 @@ class DatabaseManager:
         return await self.fetch_one(
             "SELECT * FROM user_watchlist WHERE user_id=? AND anilist_id=?",
             (user_id, anilist_id),
+        )
+
+    async def update_watchlist_score(
+        self, user_id: str, anilist_id: int, score: float
+    ) -> None:
+        """Update just the score for a single watchlist entry."""
+        await self.execute(
+            "UPDATE user_watchlist SET score=? WHERE user_id=? AND anilist_id=?",
+            (score, user_id, anilist_id),
         )
 
     async def clear_watchlist(self, user_id: str) -> None:
@@ -1494,6 +1517,45 @@ class DatabaseManager:
 
         await self.db.commit()
         return len(rating_keys)
+
+    async def purge_service_data(self, source: str) -> dict[str, int]:
+        """Delete all stored data for a media service ('plex' or 'jellyfin').
+
+        Removes the service's media mappings (which cascade-delete matching
+        ``sync_state`` rows via FK), its media snapshot table, its manual
+        overrides, its watch-sync audit log, and its linked watch-sync users.
+        Returns per-table deletion counts.
+
+        Does NOT touch ``app_settings`` — the caller clears credentials
+        separately. Leaves shared/local data (series groups, libraries,
+        restructure logs, AniList cache) intact.
+        """
+        if source not in ("plex", "jellyfin"):
+            raise ValueError(f"Unknown media source: {source!r}")
+
+        counts: dict[str, int] = {}
+
+        cur = await self.execute("DELETE FROM media_mappings WHERE source=?", (source,))
+        counts["media_mappings"] = cur.rowcount or 0
+
+        cur = await self.execute(
+            "DELETE FROM manual_overrides WHERE source=?", (source,)
+        )
+        counts["manual_overrides"] = cur.rowcount or 0
+
+        cur = await self.execute("DELETE FROM watch_sync_log WHERE source=?", (source,))
+        counts["watch_sync_log"] = cur.rowcount or 0
+
+        if source == "plex":
+            cur = await self.execute("DELETE FROM plex_media")
+            counts["plex_media"] = cur.rowcount or 0
+            await self.clear_plex_users()
+        else:
+            cur = await self.execute("DELETE FROM jellyfin_media")
+            counts["jellyfin_media"] = cur.rowcount or 0
+            await self.clear_jellyfin_users()
+
+        return counts
 
     # ------------------------------------------------------------------
     # Crunchyroll Preview
