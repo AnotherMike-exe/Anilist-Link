@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.Download.ArrPostProcessor import ArrPostProcessor
-from src.Utils.Config import AppConfig, RadarrConfig, SonarrConfig
+from src.Utils.Config import AniListConfig, AppConfig, RadarrConfig, SonarrConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -496,3 +496,144 @@ async def test_webhook_radarr_uses_folder_template() -> None:
     _, dst = moved_paths[0]
     # Title pref is romaji → "Kimi no Na wa [2016]" (not english "Your Name")
     assert "Kimi no Na wa [2016]" in dst
+
+
+# ---------------------------------------------------------------------------
+# Tests — _resolve_sonarr_anilist_id / _heal_season_mappings
+# ---------------------------------------------------------------------------
+
+
+def _make_season_resolve_db(
+    per_season: dict[int, int],
+    tvdb_id: int | None = 5000,
+    series_level: int | None = None,
+) -> tuple[MagicMock, list[tuple]]:
+    """Return a DB mock driving _resolve_sonarr_anilist_id + the executed rows.
+
+    ``per_season`` maps season_number → anilist_id for existing season rows.
+    The returned list captures INSERT OR REPLACE calls (self-heal writes).
+    """
+    db = MagicMock()
+    executed: list[tuple] = []
+
+    async def fetch_one(query: str, params: tuple = ()) -> dict[str, Any] | None:
+        q = " ".join(query.split())
+        if "AND season_number=?" in q:
+            season = params[1]
+            aid = per_season.get(season)
+            return {"anilist_id": aid} if aid is not None else None
+        if "SELECT 1 FROM anilist_sonarr_season_mapping" in q:
+            return {"1": 1} if per_season else None
+        if "SELECT tvdb_id FROM anilist_sonarr_mapping" in q:
+            return {"tvdb_id": tvdb_id} if tvdb_id else None
+        if "SELECT anilist_id FROM anilist_sonarr_mapping" in q:
+            return {"anilist_id": series_level} if series_level is not None else None
+        return None
+
+    async def fetch_all(query: str, params: tuple = ()) -> list[dict[str, Any]]:
+        q = " ".join(query.split())
+        if "FROM anilist_sonarr_season_mapping" in q and "ORDER BY season_number" in q:
+            return [
+                {"season_number": s, "anilist_id": a}
+                for s, a in sorted(per_season.items())
+            ]
+        return []
+
+    async def execute(query: str, params: tuple = ()) -> None:
+        if "INSERT OR REPLACE INTO anilist_sonarr_season_mapping" in query:
+            executed.append(params)
+
+    db.fetch_one = fetch_one
+    db.fetch_all = fetch_all
+    db.execute = execute
+    return db, executed
+
+
+def _config_with_anilist(client_id: str = "cid") -> AppConfig:
+    return AppConfig(
+        sonarr=SonarrConfig(url="http://sonarr", api_key="k"),
+        anilist=AniListConfig(client_id=client_id, client_secret="secret"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_season_hit_returns_mapping() -> None:
+    """A directly-mapped season returns its AniList ID without healing."""
+    db, executed = _make_season_resolve_db({1: 100, 2: 200})
+    processor = ArrPostProcessor(db=db, config=_config_with_anilist())
+    aid = await processor._resolve_sonarr_anilist_id(42, 2)
+    assert aid == 200
+    assert executed == []  # no heal needed
+
+
+@pytest.mark.asyncio
+async def test_resolve_unmapped_season_self_heals() -> None:
+    """An unmapped later season rebuilds the chain and resolves the new season."""
+    # Only season 1 is mapped; season 2 aired later and has no row.
+    db, executed = _make_season_resolve_db({1: 100}, tvdb_id=5000)
+    processor = ArrPostProcessor(db=db, config=_config_with_anilist())
+
+    fake_client = MagicMock()
+    fake_client.close = AsyncMock()
+
+    async def fake_chain(seed: int, tvdb: int, client: Any, **_: Any) -> list[int]:
+        return [100, 200]  # S1=100, S2=200
+
+    with (
+        patch(
+            "src.Clients.AnilistClient.AniListClient", return_value=fake_client
+        ),
+        patch(
+            "src.Utils.NamingTranslator.collect_series_chain", side_effect=fake_chain
+        ),
+    ):
+        aid = await processor._resolve_sonarr_anilist_id(42, 2)
+
+    assert aid == 200
+    # Full chain persisted: (sonarr_id, season, anilist_id) for both seasons.
+    assert (42, 1, 100) in executed
+    assert (42, 2, 200) in executed
+    fake_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_resolve_unmapped_season_heal_no_config_returns_none() -> None:
+    """Without AniList configured, an unmapped season resolves to None (safe skip)."""
+    db, executed = _make_season_resolve_db({1: 100})
+    processor = ArrPostProcessor(db=db, config=_config_with_anilist(client_id=""))
+    aid = await processor._resolve_sonarr_anilist_id(42, 2)
+    assert aid is None
+    assert executed == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_unmapped_season_chain_too_short_returns_none() -> None:
+    """If the rebuilt chain still lacks the season, resolve returns None."""
+    db, executed = _make_season_resolve_db({1: 100}, tvdb_id=5000)
+    processor = ArrPostProcessor(db=db, config=_config_with_anilist())
+
+    fake_client = MagicMock()
+    fake_client.close = AsyncMock()
+
+    async def short_chain(seed: int, tvdb: int, client: Any, **_: Any) -> list[int]:
+        return [100]  # still only S1 — S2 not yet on AniList
+
+    with (
+        patch("src.Clients.AnilistClient.AniListClient", return_value=fake_client),
+        patch(
+            "src.Utils.NamingTranslator.collect_series_chain", side_effect=short_chain
+        ),
+    ):
+        aid = await processor._resolve_sonarr_anilist_id(42, 2)
+
+    assert aid is None
+    assert executed == []  # nothing persisted when the season can't be resolved
+
+
+@pytest.mark.asyncio
+async def test_resolve_series_level_when_no_season_table() -> None:
+    """A 1:1 series with no season table falls back to the series-level mapping."""
+    db, executed = _make_season_resolve_db({}, series_level=321)
+    processor = ArrPostProcessor(db=db, config=_config_with_anilist())
+    aid = await processor._resolve_sonarr_anilist_id(42, 1)
+    assert aid == 321

@@ -766,7 +766,14 @@ class ArrPostProcessor:
             (sonarr_id,),
         )
         if any_season:
-            return None
+            # A partial season table exists but this season isn't in it. This
+            # happens when a new cour/season aired after the series was added
+            # (so it was never in the sequel chain we built). Rather than
+            # silently skip — which leaves the file unorganized in Sonarr's
+            # raw import folder — try to rebuild the chain so the new season
+            # picks up a mapping. Returns None if it still can't be resolved.
+            healed = await self._heal_season_mappings(sonarr_id, season_number)
+            return healed
 
         # Fall back to series-level mapping (covers 1:1 TVDB:AniList shows)
         row = await self._db.fetch_one(
@@ -774,6 +781,92 @@ class ArrPostProcessor:
             (sonarr_id,),
         )
         return int(row["anilist_id"]) if row else None
+
+    async def _heal_season_mappings(
+        self, sonarr_id: int, requested_season: int
+    ) -> int | None:
+        """Rebuild the sequel chain for a series and persist missing season maps.
+
+        Called when a download arrives for a season that has no mapping but the
+        series already has *some* season mappings — typically a newer cour that
+        aired after the series was first added. Re-walks the AniList sequel/
+        prequel chain from the earliest known entry and re-persists the full
+        chain, then returns the AniList ID now mapped to *requested_season*
+        (or ``None`` if the season still can't be resolved).
+        """
+        if not self._config.anilist.client_id:
+            return None
+
+        rows = await self._db.fetch_all(
+            "SELECT season_number, anilist_id FROM anilist_sonarr_season_mapping"
+            " WHERE sonarr_id=? ORDER BY season_number",
+            (sonarr_id,),
+        )
+        if not rows:
+            return None
+
+        # Earliest known season = start of the chain (any chain member works —
+        # collect_series_chain walks both sequel and prequel edges).
+        seed_aid = int(rows[0]["anilist_id"])
+
+        tvdb_row = await self._db.fetch_one(
+            "SELECT tvdb_id FROM anilist_sonarr_mapping"
+            " WHERE sonarr_id=? AND tvdb_id IS NOT NULL",
+            (sonarr_id,),
+        )
+        tvdb_id = int(tvdb_row["tvdb_id"]) if tvdb_row and tvdb_row["tvdb_id"] else 0
+
+        from src.Clients.AnilistClient import AniListClient
+        from src.Utils.NamingTranslator import (
+            collect_series_chain,
+            resolve_tvdb_id,
+            resolve_tvdb_via_prequel_chain,
+        )
+
+        anilist = AniListClient(
+            client_id=self._config.anilist.client_id,
+            client_secret=self._config.anilist.client_secret,
+        )
+        try:
+            if not tvdb_id:
+                tvdb_id = await resolve_tvdb_id(seed_aid, anilist) or 0
+                if not tvdb_id:
+                    resolved, _ = await resolve_tvdb_via_prequel_chain(
+                        seed_aid, anilist
+                    )
+                    tvdb_id = resolved or 0
+            if not tvdb_id:
+                return None
+
+            chain = await collect_series_chain(seed_aid, tvdb_id, anilist)
+            if len(chain) < requested_season:
+                # Chain still doesn't reach this season — nothing we can do.
+                return None
+
+            for idx, chain_aid in enumerate(chain):
+                await self._db.execute(
+                    "INSERT OR REPLACE INTO anilist_sonarr_season_mapping"
+                    " (sonarr_id, season_number, anilist_id) VALUES (?, ?, ?)",
+                    (sonarr_id, idx + 1, chain_aid),
+                )
+            logger.info(
+                "Self-healed season mappings for sonarr_id=%d — %d seasons "
+                "(triggered by unmapped season %d)",
+                sonarr_id,
+                len(chain),
+                requested_season,
+            )
+            return int(chain[requested_season - 1])
+        except Exception as exc:
+            logger.warning(
+                "Season self-heal failed for sonarr_id=%d season=%d: %s",
+                sonarr_id,
+                requested_season,
+                exc,
+            )
+            return None
+        finally:
+            await anilist.close()
 
     async def _get_library_output_path(self, anilist_format: str = "") -> str | None:
         """Return the appropriate library output path.
@@ -888,6 +981,13 @@ class ArrPostProcessor:
                 except Exception:
                     break  # Stop at the first directory we don't own
             shutil.move(src, dst)
+            # shutil.move preserves the source file's mode, which (coming from
+            # the download client) may not be group-writable. Ensure the group
+            # (shared with Sonarr/Radarr) can manage the file after the move.
+            try:
+                Path(dst).chmod(Path(dst).stat().st_mode | 0o664)
+            except Exception:
+                logger.debug("Could not adjust mode on %s", dst, exc_info=True)
             logger.info("Moved %s → %s", src, dst)
             return True
         except Exception as exc:
