@@ -479,6 +479,16 @@ class DatabaseManager:
             except (json.JSONDecodeError, TypeError):
                 items = []
 
+        # De-dupe: drop any existing active notification with the same
+        # action_url so re-running a scan replaces its prompt instead of
+        # stacking duplicate "scan complete" notices.
+        if action_url:
+            items = [
+                n
+                for n in items
+                if n.get("dismissed") or n.get("action_url") != action_url
+            ]
+
         nid = uuid.uuid4().hex[:12]
         items.append(
             {

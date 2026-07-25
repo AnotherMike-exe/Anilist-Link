@@ -224,9 +224,11 @@
     })();
 
     // --- Persistent notifications (DB-backed, survives page reloads) ---
-    // X button only hides for the current session (sessionStorage).
-    // Notifications are permanently removed only when the user applies
-    // results (server calls dismiss_notifications_by_url).
+    // X button permanently dismisses server-side (POST .../dismiss) so a
+    // notice does not reappear on reload / new session / another device.
+    // sessionStorage is kept only as an instant-hide fallback if that
+    // request fails. Notices are also cleared when the user applies results
+    // (server calls dismiss_notifications_by_url).
     (function () {
         const bar = document.getElementById('notification-bar');
         const HIDE_KEY = 'notif_hidden';
@@ -274,13 +276,10 @@
             } catch (e) { /* ignore */ }
         }
 
-        // Session-only hide (X button) — comes back on new session
+        // Permanent dismiss (X button) — persists server-side so it stays
+        // gone across reloads, sessions, and devices.
         window.hideNotification = function(id) {
-            const hidden = getHidden();
-            if (!hidden.includes(id)) {
-                hidden.push(id);
-                sessionStorage.setItem(HIDE_KEY, JSON.stringify(hidden));
-            }
+            // Optimistically remove from the DOM for instant feedback.
             const el = bar.querySelector(`[data-id="${id}"]`);
             if (el) el.remove();
             currentIds = Array.from(bar.querySelectorAll('.notif-item'))
@@ -288,6 +287,17 @@
             if (!bar.querySelector('.notif-item')) {
                 bar.classList.remove('has-notifications');
             }
+            // Persist the dismissal. Fall back to a session-only hide if the
+            // request fails so it at least does not flicker back this session.
+            fetch(`/api/notifications/${encodeURIComponent(id)}/dismiss`, {
+                method: 'POST',
+            }).catch(function () {
+                const hidden = getHidden();
+                if (!hidden.includes(id)) {
+                    hidden.push(id);
+                    sessionStorage.setItem(HIDE_KEY, JSON.stringify(hidden));
+                }
+            });
         };
 
         window._refreshNotifications = pollNotifications;
