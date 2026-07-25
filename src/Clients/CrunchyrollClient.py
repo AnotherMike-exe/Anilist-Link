@@ -702,13 +702,56 @@ class CrunchyrollClient:
     # Driver setup (Docker-compatible, ported with all flags)
     # ==================================================================
 
+    @staticmethod
+    def _ensure_browser_home() -> str:
+        """Return a writable base dir for Chrome/driver state and point the
+        HOME/XDG environment variables at it.
+
+        The container runs as a non-root user (PUID/PGID) whose HOME is often
+        unset or ``/``.  ``undetected_chromedriver`` resolves its patched-driver
+        cache and Chrome resolves its profile via ``appdirs``/XDG, which then
+        target ``/.local`` and fail with ``PermissionError``.  Redirecting these
+        to a writable location (``/config`` in the container, a temp dir
+        otherwise) fixes driver setup.
+        """
+        import tempfile
+
+        base: str | None = None
+        for candidate in ("/config", os.environ.get("HOME", "")):
+            if candidate and os.path.isdir(candidate) and os.access(candidate, os.W_OK):
+                base = os.path.join(candidate, ".anilist-link-browser")
+                break
+        if base is None:
+            base = os.path.join(tempfile.gettempdir(), "anilist-link-browser")
+
+        for sub in ("", "cache", "data", "config"):
+            try:
+                os.makedirs(os.path.join(base, sub) if sub else base, exist_ok=True)
+            except OSError as exc:  # pragma: no cover - defensive
+                logger.warning("Could not create browser dir %s: %s", base, exc)
+
+        os.environ["HOME"] = base
+        os.environ["XDG_CACHE_HOME"] = os.path.join(base, "cache")
+        os.environ["XDG_DATA_HOME"] = os.path.join(base, "data")
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(base, "config")
+        return base
+
     def _setup_driver(self) -> None:
         """Initialize undetected Chrome WebDriver with Docker-compatible flags."""
         import subprocess
 
+        # Redirect HOME/XDG to a writable location BEFORE importing uc, so the
+        # driver-patcher cache and Chrome profile land somewhere writable.
+        browser_home = self._ensure_browser_home()
+
         import undetected_chromedriver as uc
 
         options = uc.ChromeOptions()
+
+        # Keep Chrome's own profile inside the writable browser home too.
+        options.add_argument(
+            f"--user-data-dir={os.path.join(browser_home, 'chrome-profile')}"
+        )
 
         _chrome_candidates = [
             os.environ.get("CHROME_BIN", ""),
