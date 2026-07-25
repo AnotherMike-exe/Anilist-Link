@@ -746,6 +746,19 @@ class CrunchyrollClient:
 
         import undetected_chromedriver as uc
 
+        # undetected_chromedriver caches its patched driver under
+        # ``Patcher.data_path`` -- a CLASS attribute resolved from HOME via
+        # ``expanduser("~/...")`` AT IMPORT TIME.  If HOME was ever empty at
+        # import, that frozen value becomes ``/.local`` and every driver launch
+        # fails with PermissionError.  Pin it explicitly to our writable base so
+        # the outcome no longer depends on when/where uc was first imported.
+        uc_cache = os.path.join(browser_home, "uc-driver")
+        try:
+            os.makedirs(uc_cache, exist_ok=True)
+            uc.Patcher.data_path = uc_cache
+        except OSError as exc:  # pragma: no cover - defensive
+            logger.warning("Could not set undetected_chromedriver cache: %s", exc)
+
         options = uc.ChromeOptions()
 
         # Keep Chrome's own profile inside the writable browser home too.
