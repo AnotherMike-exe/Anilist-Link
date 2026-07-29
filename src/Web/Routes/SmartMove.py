@@ -96,7 +96,11 @@ async def _analyze_one(
     restructurer = await LibraryRestructurer.from_settings(db, anilist_client)
     progress = RestructureProgress(status="running")
     plan = await restructurer.analyze(
-        [show], progress, level="full_restructure", output_dir=output_dir or None
+        [show],
+        progress,
+        level="full_restructure",
+        output_dir=output_dir or None,
+        force_franchise_root=True,
     )
     return restructurer, plan, output_dir
 

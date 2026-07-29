@@ -955,6 +955,7 @@ class LibraryRestructurer:
         output_dir: str | None = None,
         movie_output_dir: str | None = None,
         tv_output_dir: str | None = None,
+        force_franchise_root: bool = False,
     ) -> RestructurePlan:
         """Analyze shows and build a restructure plan.
 
@@ -968,6 +969,11 @@ class LibraryRestructurer:
                 entries go here instead of output_dir.
             tv_output_dir: When movie/TV split is enabled, all non-MOVIE
                 entries go here instead of output_dir.
+            force_franchise_root: When True, a standalone entry with no distinct
+                group root still has its PREQUEL chain walked to find a franchise
+                base to nest under — regardless of format.  Used by the
+                single-item Smart Move (cost is negligible for one entry) so a
+                movie with a missing/wrong cached format still nests.
         """
         progress.status = "analyzing"
         progress.phase = "Analyzing shows"
@@ -980,6 +986,7 @@ class LibraryRestructurer:
         # _resolve_output_dir.
         self._movie_output_dir = movie_output_dir
         self._tv_output_dir = tv_output_dir
+        self._force_franchise_root = force_franchise_root
 
         plan = RestructurePlan(groups=[], operation_level=level)
 
@@ -1609,12 +1616,12 @@ class LibraryRestructurer:
 
             # When the group is missing or self-rooted (a stale single-entry
             # group can't reach the base), trace the PREQUEL chain to the
-            # franchise root — but only for movies, to keep full-library
-            # analysis cheap.
-            if (
-                (not _root_id or _root_id == si.anilist_id)
-                and si.anilist_id
-                and (si.anilist_format or "").upper() == "MOVIE"
+            # franchise root.  Gated to movies during a full-library analysis to
+            # keep it cheap, but forced for the single-item Smart Move.
+            _force = getattr(self, "_force_franchise_root", False)
+            _is_movie = (si.anilist_format or "").upper() == "MOVIE"
+            if (not _root_id or _root_id == si.anilist_id) and si.anilist_id and (
+                _force or _is_movie
             ):
                 try:
                     from src.Utils.NamingTranslator import resolve_franchise_root_id
@@ -1623,8 +1630,6 @@ class LibraryRestructurer:
                         si.anilist_id, self._group_builder._anilist
                     )
                     if _walked and _walked != si.anilist_id:
-                        # Build the correctly-rooted group so metadata is cached
-                        # and future lookups agree on the root.
                         try:
                             await self._group_builder.get_or_build_group(_walked)
                         except Exception:
@@ -1635,14 +1640,26 @@ class LibraryRestructurer:
                         "Prequel-root walk failed for %s: %s", si.title, _exc
                     )
 
+            _root_folder = ""
             if _root_id and _root_id != si.anilist_id:
-                _root_folder = ""
                 if _grp_id:
                     _root_folder = await self._render_group_root_folder(_grp_id)
                 if not _root_folder:
                     _root_folder = await self._render_root_folder_by_id(_root_id)
                 if _root_folder and _root_folder != rendered_folder:
                     parent_dir = os.path.join(parent_dir, _root_folder)
+
+            logger.info(
+                "Restructure nesting for %r (anilist_id=%s, format=%r):"
+                " group_id=%s group_root=%s resolved_root=%s -> root_folder=%r",
+                si.title,
+                si.anilist_id,
+                si.anilist_format,
+                _grp_id,
+                _root_id if _grp_id else None,
+                _root_id,
+                _root_folder or None,
+            )
 
             target_folder = os.path.join(parent_dir, rendered_folder)
 
