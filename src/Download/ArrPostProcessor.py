@@ -561,12 +561,32 @@ class ArrPostProcessor:
                     local_series_for_file = local_series_fallback or ""
                 local_target = str(Path(local_series_for_file) / season_dir / filename)
 
+                logger.info(
+                    "Sonarr reprocess file_id=%d anilist_id=%d season=%d:"
+                    " show_folder=%r subfolder=%r\n    from: %s\n    to:   %s",
+                    file_id,
+                    anilist_id,
+                    season_number,
+                    safe_dir,
+                    season_dir,
+                    local_current,
+                    local_target,
+                )
+
                 if Path(local_target).resolve() == Path(local_current).resolve():
+                    logger.info(
+                        "Skipping file_id=%d — already at target location", file_id
+                    )
                     skipped += 1
                     continue
 
                 # Source gone but target exists = already moved previously
                 if not Path(local_current).exists() and Path(local_target).exists():
+                    logger.info(
+                        "Skipping file_id=%d — source missing and target exists"
+                        " (already moved)",
+                        file_id,
+                    )
                     skipped += 1
                     continue
 
@@ -601,6 +621,14 @@ class ArrPostProcessor:
 
             if moved > 0:
                 self._schedule_media_server_sync()
+            logger.info(
+                "Sonarr reprocess complete for sonarr_id=%d: moved=%d skipped=%d"
+                " errors=%d",
+                sonarr_id,
+                moved,
+                skipped,
+                errors,
+            )
             return {"ok": True, "moved": moved, "skipped": skipped, "errors": errors}
         finally:
             await sonarr.close()
@@ -1059,11 +1087,17 @@ class ArrPostProcessor:
         if group and group.get("root_anilist_id"):
             root = int(group["root_anilist_id"])
             if root != anilist_id:
+                logger.info(
+                    "Franchise root for anilist_id=%d = %d (via series group)",
+                    anilist_id,
+                    root,
+                )
                 self._root_cache[anilist_id] = root
                 return root
 
         resolved = anilist_id
         should_walk = force_walk
+        fmt = ""
         if not should_walk:
             from src.Utils.NamingTranslator import is_movie_format
 
@@ -1072,7 +1106,13 @@ class ArrPostProcessor:
 
         if should_walk:
             anilist_client = getattr(self._app_state, "anilist_client", None)
-            if anilist_client is not None:
+            if anilist_client is None:
+                logger.warning(
+                    "Cannot walk prequel chain for anilist_id=%d — no AniList"
+                    " client on app_state",
+                    anilist_id,
+                )
+            else:
                 try:
                     from src.Utils.NamingTranslator import resolve_franchise_root_id
 
@@ -1085,6 +1125,23 @@ class ArrPostProcessor:
                         anilist_id,
                         exc,
                     )
+            logger.info(
+                "Franchise root for anilist_id=%d = %d (via PREQUEL walk,"
+                " group_root=%s, format=%r)",
+                anilist_id,
+                resolved,
+                (group or {}).get("root_anilist_id"),
+                fmt,
+            )
+        else:
+            logger.info(
+                "No prequel walk for anilist_id=%d (format=%r, force_walk=%s,"
+                " group_root=%s) — staying flat",
+                anilist_id,
+                fmt,
+                force_walk,
+                (group or {}).get("root_anilist_id"),
+            )
         self._root_cache[anilist_id] = resolved
         return resolved
 
