@@ -258,12 +258,9 @@ class ArrPostProcessor:
         original_name = Path(current_path).name
         filename = await self._get_movie_file_name(original_name, title_info)
         await self._ensure_series_group(anilist_id)
-        # Ensure the movie + group root have a cached year so the folder names
-        # match the metadata writer's (e.g. "Demon Slayer (2019)").
-        root_id = await self._resolve_group_root_id(anilist_id)
         await self._ensure_metadata_cached(anilist_id)
-        if root_id != anilist_id:
-            await self._ensure_metadata_cached(root_id)
+        # _get_movie_relative_dir resolves the franchise root (series group or
+        # PREQUEL chain) and caches its title/year so nesting + naming match.
         rel_dir = await self._get_movie_relative_dir(anilist_id)
 
         # Use library output path as target root; fall back to Radarr movie root
@@ -659,10 +656,7 @@ class ArrPostProcessor:
                 target_root = str(arr_root)
             local_root = Path(self._to_local(target_root, arr_prefix, local_prefix))
             await self._ensure_series_group(anilist_id)
-            root_id = await self._resolve_group_root_id(anilist_id)
             await self._ensure_metadata_cached(anilist_id)
-            if root_id != anilist_id:
-                await self._ensure_metadata_cached(root_id)
             rel_dir = await self._get_movie_relative_dir(anilist_id)
 
             if dry_run:
@@ -967,15 +961,46 @@ class ArrPostProcessor:
         it is nested under the group ROOT folder (e.g. ``Demon Slayer/Infinity
         Castle``); otherwise it lands in a flat ``<movie folder>``.
         """
-        show_info, movie_info = await self._get_show_and_season_info(anilist_id)
+        movie_info = await self._get_anilist_title_info(anilist_id)
         movie_dir = await self._get_folder_name(movie_info)
-        # _get_show_and_season_info returns the same object for both when the
-        # entry is not part of a multi-entry group — nest only when it is.
-        if show_info is not movie_info:
-            show_dir = await self._get_folder_name(show_info)
-            if show_dir and show_dir != movie_dir:
-                return Path(show_dir) / movie_dir
+
+        root_id = await self._resolve_franchise_root(anilist_id)
+        if root_id and root_id != anilist_id:
+            # Make sure the root's title/year are cached so the folder renders
+            # the same name as the metadata writer's master folder.
+            await self._ensure_metadata_cached(root_id)
+            root_info = await self._get_anilist_title_info(root_id)
+            if root_info.get("title"):
+                root_dir = await self._get_folder_name(root_info)
+                if root_dir and root_dir != movie_dir:
+                    return Path(root_dir) / movie_dir
         return Path(movie_dir)
+
+    async def _resolve_franchise_root(self, anilist_id: int) -> int:
+        """Resolve the franchise ROOT AniList id for nesting a movie.
+
+        Trusts the series group when it already traces to a distinct root;
+        otherwise walks the PREQUEL chain back to the base (e.g. a Demon Slayer
+        movie → base TV season) so a stale/self-rooted group can't strand the
+        movie in a top-level folder.
+        """
+        group = await self._db.get_series_group_by_anilist_id(anilist_id)
+        if group and group.get("root_anilist_id"):
+            root = int(group["root_anilist_id"])
+            if root != anilist_id:
+                return root
+        anilist_client = getattr(self._app_state, "anilist_client", None)
+        if anilist_client is None:
+            return anilist_id
+        try:
+            from src.Utils.NamingTranslator import resolve_franchise_root_id
+
+            return await resolve_franchise_root_id(anilist_id, anilist_client)
+        except Exception as exc:
+            logger.warning(
+                "Prequel-root walk failed for anilist_id=%d: %s", anilist_id, exc
+            )
+            return anilist_id
 
     async def _ensure_series_group(self, anilist_id: int) -> None:
         """Build the series group for an entry if one isn't cached yet.
@@ -1061,13 +1086,6 @@ class ArrPostProcessor:
             logger.warning(
                 "Could not backfill metadata for anilist_id=%d: %s", anilist_id, exc
             )
-
-    async def _resolve_group_root_id(self, anilist_id: int) -> int:
-        """Return the series-group ROOT anilist_id, or the entry id if ungrouped."""
-        group = await self._db.get_series_group_by_anilist_id(anilist_id)
-        if group and group.get("root_anilist_id"):
-            return int(group["root_anilist_id"])
-        return anilist_id
 
     async def _get_anilist_title_and_year(self, anilist_id: int) -> tuple[str, int]:
         """Return the best available (title, year) for an AniList entry."""

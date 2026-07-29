@@ -649,38 +649,44 @@ def _folder_by_title(title_info: dict) -> str:
     return title_info["title"]
 
 
-@pytest.mark.asyncio
-async def test_movie_relative_dir_nests_under_group_root() -> None:
-    """A grouped movie nests under the group ROOT folder (Demon Slayer/...)."""
-    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+def _wire_movie_relative_dir(
+    processor: ArrPostProcessor, root_id: int, titles: dict[int, str]
+) -> None:
+    """Wire the collaborators of _get_movie_relative_dir for a movie test.
 
-    show_info = _title_info(title="Demon Slayer")
-    movie_info = _title_info(title="Infinity Castle")
+    titles maps anilist_id -> folder title; root_id is what the franchise-root
+    resolver returns for the movie under test.
+    """
 
-    async def show_and_season(anilist_id: int) -> tuple[dict, dict]:
-        return show_info, movie_info  # distinct objects → grouped
+    async def title_info(anilist_id: int) -> dict:
+        return _title_info(title=titles.get(anilist_id, ""))
 
-    processor._get_show_and_season_info = show_and_season  # type: ignore[assignment]
+    async def resolve_root(anilist_id: int) -> int:
+        return root_id
+
+    processor._get_anilist_title_info = title_info  # type: ignore[assignment]
+    processor._resolve_franchise_root = resolve_root  # type: ignore[assignment]
+    processor._ensure_metadata_cached = AsyncMock()  # type: ignore[method-assign]
     processor._get_folder_name = AsyncMock(side_effect=_folder_by_title)  # type: ignore[method-assign]
 
-    rel = await processor._get_movie_relative_dir(123)
+
+@pytest.mark.asyncio
+async def test_movie_relative_dir_nests_under_franchise_root() -> None:
+    """A franchise movie nests under the resolved root folder (Demon Slayer/...)."""
+    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+    _wire_movie_relative_dir(
+        processor, root_id=101, titles={55: "Infinity Castle", 101: "Demon Slayer"}
+    )
+    rel = await processor._get_movie_relative_dir(55)
     assert str(rel) == "Demon Slayer/Infinity Castle"
 
 
 @pytest.mark.asyncio
-async def test_movie_relative_dir_flat_when_standalone() -> None:
-    """A standalone movie (no group) stays in a flat single folder."""
+async def test_movie_relative_dir_flat_when_no_prequel_root() -> None:
+    """A standalone movie (root resolves to itself) stays in a flat folder."""
     processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
-
-    info = _title_info(title="Some Movie")
-
-    async def show_and_season(anilist_id: int) -> tuple[dict, dict]:
-        return info, info  # same object → not grouped
-
-    processor._get_show_and_season_info = show_and_season  # type: ignore[assignment]
-    processor._get_folder_name = AsyncMock(side_effect=_folder_by_title)  # type: ignore[method-assign]
-
-    rel = await processor._get_movie_relative_dir(123)
+    _wire_movie_relative_dir(processor, root_id=55, titles={55: "Some Movie"})
+    rel = await processor._get_movie_relative_dir(55)
     assert str(rel) == "Some Movie"
 
 
@@ -688,17 +694,10 @@ async def test_movie_relative_dir_flat_when_standalone() -> None:
 async def test_movie_relative_dir_flat_when_root_matches_movie() -> None:
     """No duplicate nesting when root and movie render the same folder name."""
     processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
-
-    show_info = _title_info(title="Demon Slayer")
-    movie_info = _title_info(title="Demon Slayer")
-
-    async def show_and_season(anilist_id: int) -> tuple[dict, dict]:
-        return show_info, movie_info
-
-    processor._get_show_and_season_info = show_and_season  # type: ignore[assignment]
-    processor._get_folder_name = AsyncMock(side_effect=_folder_by_title)  # type: ignore[method-assign]
-
-    rel = await processor._get_movie_relative_dir(123)
+    _wire_movie_relative_dir(
+        processor, root_id=101, titles={55: "Demon Slayer", 101: "Demon Slayer"}
+    )
+    rel = await processor._get_movie_relative_dir(55)
     assert str(rel) == "Demon Slayer"
 
 

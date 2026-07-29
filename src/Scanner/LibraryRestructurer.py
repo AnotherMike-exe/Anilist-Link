@@ -1089,6 +1089,34 @@ class LibraryRestructurer:
             rendered = re.sub(r'[<>:"/\\|?*]', "", display_title).strip()
         return rendered
 
+    async def _render_root_folder_by_id(self, root_id: int) -> str:
+        """Render a franchise root folder name from an entry's cached metadata.
+
+        Used when nesting via the PREQUEL chain (no series-group row to read a
+        display title from).  Returns "" when the entry isn't cached.
+        """
+        cache = await self._db.get_cached_metadata(root_id)
+        if not cache:
+            return ""
+        romaji = cache.get("title_romaji") or ""
+        english = cache.get("title_english") or ""
+        if self._title_pref == "english" and english:
+            title = english
+        else:
+            title = romaji or english
+        if not title:
+            return ""
+        year = cache.get("year") or 0
+        tokens: dict[str, str] = {
+            "title": self._san(title),
+            "title.romaji": self._san(romaji or title),
+            "title.english": self._san(english or title),
+            "year": str(year) if year else "",
+            "format": "",
+            "format.short": "",
+        }
+        return self._san(self._folder_tmpl.render(tokens))
+
     async def _analyze_full_restructure(
         self,
         shows: list[ShowInput],
@@ -1570,17 +1598,51 @@ class LibraryRestructurer:
             # elsewhere / aren't in this scan) under the series-group ROOT
             # folder so it sits beside its siblings (Structure A) instead of in
             # a separate top-level directory.
+            _root_id = 0
             _grp_id = standalone_group_id.get(si.anilist_id)
             if _grp_id:
                 _root_row = await self._db.fetch_one(
                     "SELECT root_anilist_id FROM series_groups WHERE id=?",
                     (_grp_id,),
                 )
-                _root_id = (_root_row or {}).get("root_anilist_id") or 0
-                if _root_id and _root_id != si.anilist_id:
+                _root_id = int((_root_row or {}).get("root_anilist_id") or 0)
+
+            # When the group is missing or self-rooted (a stale single-entry
+            # group can't reach the base), trace the PREQUEL chain to the
+            # franchise root — but only for movies, to keep full-library
+            # analysis cheap.
+            if (
+                (not _root_id or _root_id == si.anilist_id)
+                and si.anilist_id
+                and (si.anilist_format or "").upper() == "MOVIE"
+            ):
+                try:
+                    from src.Utils.NamingTranslator import resolve_franchise_root_id
+
+                    _walked = await resolve_franchise_root_id(
+                        si.anilist_id, self._group_builder._anilist
+                    )
+                    if _walked and _walked != si.anilist_id:
+                        # Build the correctly-rooted group so metadata is cached
+                        # and future lookups agree on the root.
+                        try:
+                            await self._group_builder.get_or_build_group(_walked)
+                        except Exception:
+                            pass
+                        _root_id = _walked
+                except Exception as _exc:
+                    logger.debug(
+                        "Prequel-root walk failed for %s: %s", si.title, _exc
+                    )
+
+            if _root_id and _root_id != si.anilist_id:
+                _root_folder = ""
+                if _grp_id:
                     _root_folder = await self._render_group_root_folder(_grp_id)
-                    if _root_folder and _root_folder != rendered_folder:
-                        parent_dir = os.path.join(parent_dir, _root_folder)
+                if not _root_folder:
+                    _root_folder = await self._render_root_folder_by_id(_root_id)
+                if _root_folder and _root_folder != rendered_folder:
+                    parent_dir = os.path.join(parent_dir, _root_folder)
 
             target_folder = os.path.join(parent_dir, rendered_folder)
 
