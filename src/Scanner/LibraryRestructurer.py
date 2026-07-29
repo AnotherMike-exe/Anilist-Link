@@ -2120,11 +2120,15 @@ class LibraryRestructurer:
                     )
                 )
 
-            # Skip if nothing changes (same folder name and all files unchanged).
-            # Use realpath comparison so symlinks and path normalisation
-            # don't cause false positives on already-structured content.
-            current_folder = os.path.basename(si.local_path)
-            folder_changed = current_folder != rendered_folder
+            # Skip if nothing changes (folder already at the target and all
+            # files unchanged).  Compare FULL paths, not just the basename, so a
+            # relocation into a new parent (e.g. nesting a movie under its
+            # franchise root) counts as a change even when the folder name is
+            # unchanged.  Realpath keeps symlinks/normalisation from causing
+            # false positives.
+            folder_changed = os.path.realpath(si.local_path) != os.path.realpath(
+                target_folder
+            )
             files_changed = any(
                 fm.original_filename != fm.renamed_filename
                 and os.path.realpath(fm.source) != os.path.realpath(fm.destination)
