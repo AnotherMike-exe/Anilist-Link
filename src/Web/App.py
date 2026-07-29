@@ -187,6 +187,7 @@ def create_app(
     from src.Web.Routes.PlexScan import router as plex_scan_router
     from src.Web.Routes.Restructure import router as restructure_router
     from src.Web.Routes.Settings import router as settings_router
+    from src.Web.Routes.SmartMove import router as smart_move_router
     from src.Web.Routes.SonarrSync import router as sonarr_sync_router
     from src.Web.Routes.Tools import router as tools_router
     from src.Web.Routes.UnifiedLibrary import router as unified_library_router
@@ -213,6 +214,7 @@ def create_app(
     app.include_router(plex_scan_router)
     app.include_router(restructure_router)
     app.include_router(settings_router)
+    app.include_router(smart_move_router)
     app.include_router(sonarr_sync_router)
     app.include_router(watch_sync_router)
     app.include_router(watchlist_library_router)

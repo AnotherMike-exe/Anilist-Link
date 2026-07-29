@@ -288,6 +288,11 @@
                   onclick="previewAdd({{ aid }}, '{{ entry.anilist_title|e }}', this)"
                   title="Add to Sonarr/Radarr">+ Add</button>
           {% endif %}
+          {% if entry.folder_path and entry.arr_status == 'untracked' %}
+          <button class="btn btn-secondary btn-xs"
+                  onclick="openSmartMoveWl({{ aid }}, this)"
+                  title="Move this library folder into its standardized location">Fix Location</button>
+          {% endif %}
         </div>
       </td>
     </tr>
@@ -490,6 +495,23 @@
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeDisambig()">Cancel</button>
       <button class="btn btn-primary" id="confirmPickBtn" onclick="confirmPick()" disabled style="margin-left:0.5rem;">Add to Sonarr</button>
+    </div>
+  </div>
+</div>
+
+<!-- Smart Move (Fix Location) modal — for on-disk entries not tracked in *arr -->
+<div id="smartMoveModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="smartMoveTitle">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2 id="smartMoveTitle">Fix Location</h2>
+      <button class="modal-close" onclick="closeSmartMoveWl()" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div id="smartMoveWlBody"><p style="color:var(--text-muted,#666);font-size:0.85rem;">Analyzing…</p></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeSmartMoveWl()">Cancel</button>
+      <button class="btn btn-primary" id="smartMoveWlConfirm" onclick="confirmSmartMoveWl()" disabled style="margin-left:0.5rem;">Move</button>
     </div>
   </div>
 </div>
@@ -1441,6 +1463,89 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       btn.disabled = false;
       btn.textContent = orig;
     }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Smart Move (Fix Location) — restructure an on-disk entry not tracked in *arr
+  // ---------------------------------------------------------------------------
+  var _smartMoveWl = { anilistId: null };
+
+  window.openSmartMoveWl = function(anilistId, btn) {
+    _smartMoveWl.anilistId = anilistId;
+    var body = document.getElementById('smartMoveWlBody');
+    var confirmBtn = document.getElementById('smartMoveWlConfirm');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Move';
+    body.innerHTML = '<p style="color:var(--text-muted,#666);font-size:0.85rem;">Analyzing…</p>';
+    document.getElementById('smartMoveModal').classList.remove('hidden');
+    fetch('/api/smart-move/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ anilist_id: anilistId })
+    }).then(function(r) { return r.json(); })
+      .then(renderSmartMoveWl)
+      .catch(function() {
+        body.innerHTML = '<p style="color:#c62828;font-size:0.85rem;">Preview failed.</p>';
+      });
+  };
+
+  function renderSmartMoveWl(data) {
+    var body = document.getElementById('smartMoveWlBody');
+    var confirmBtn = document.getElementById('smartMoveWlConfirm');
+    if (data.error) {
+      body.innerHTML = '<p style="color:#c62828;font-size:0.85rem;">' + escHtml(data.error) + '</p>';
+      return;
+    }
+    if (!data.needs_move) {
+      body.innerHTML = '<p style="font-size:0.9rem;">✓ Already in the correct location.</p>' +
+        '<p style="color:var(--text-muted,#666);font-size:0.8rem;word-break:break-all;">' +
+        escHtml(data.current_folder || '') + '</p>';
+      return;
+    }
+    var extra = data.support_file_count
+      ? ' and clean up ' + data.support_file_count + ' leftover metadata file(s)' : '';
+    body.innerHTML =
+      '<p style="margin-bottom:0.6rem;font-size:0.9rem;">This will move <strong>' + data.file_count +
+        '</strong> file(s)' + extra + ':</p>' +
+      '<div style="font-size:0.82rem;">' +
+        '<div style="margin-bottom:0.4rem;"><span style="color:var(--text-muted,#888);">From:</span><br>' +
+          '<span style="word-break:break-all;">' + escHtml(data.current_folder) + '</span></div>' +
+        '<div><span style="color:var(--text-muted,#888);">To:</span><br>' +
+          '<span style="word-break:break-all;color:var(--accent,#4a90d9);">' + escHtml(data.target_folder) + '</span></div>' +
+      '</div>';
+    confirmBtn.disabled = false;
+  }
+
+  window.closeSmartMoveWl = function() {
+    document.getElementById('smartMoveModal').classList.add('hidden');
+    _smartMoveWl.anilistId = null;
+  };
+
+  window.confirmSmartMoveWl = function() {
+    if (!_smartMoveWl.anilistId) return;
+    var confirmBtn = document.getElementById('smartMoveWlConfirm');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Moving…';
+    fetch('/api/smart-move/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ anilist_id: _smartMoveWl.anilistId })
+    }).then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.ok) {
+          document.getElementById('smartMoveModal').classList.add('hidden');
+          showToast('Moved ' + (data.moved || 0) + ' file(s) into place', 'success');
+        } else {
+          showToast('Move failed: ' + (data.error || 'unknown'), 'error');
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = 'Move';
+        }
+      })
+      .catch(function(e) {
+        showToast('Request failed: ' + e.message, 'error');
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Move';
+      });
   };
 
   // Copy helper that works on non-secure (plain HTTP LAN) origins too, where

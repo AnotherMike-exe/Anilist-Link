@@ -1040,6 +1040,55 @@ class LibraryRestructurer:
                     )
         return conflicts
 
+    async def _render_group_root_folder(self, group_id: int) -> str:
+        """Render the franchise ROOT folder name for a series group.
+
+        Mirrors the multi-entry group naming so a lone franchise entry
+        (e.g. a movie whose TV seasons live elsewhere) can nest under the
+        same root folder as its siblings (Structure A).  Returns "" when the
+        group can't be resolved.
+        """
+        group_info = await self._db.fetch_one(
+            "SELECT display_title, root_anilist_id FROM series_groups WHERE id=?",
+            (group_id,),
+        )
+        if not group_info:
+            return ""
+        display_title = group_info.get("display_title") or ""
+        root_anilist_id = group_info.get("root_anilist_id") or 0
+        root_cache = (
+            await self._db.get_cached_metadata(root_anilist_id)
+            if root_anilist_id
+            else None
+        )
+        safe_display = self._san(display_title)
+        tokens: dict[str, str] = {
+            "title": safe_display,
+            "title.romaji": safe_display,
+            "title.english": safe_display,
+            "year": "",
+            "format": "",
+            "format.short": "",
+        }
+        if root_cache:
+            romaji = root_cache.get("title_romaji", "")
+            english = root_cache.get("title_english", "")
+            if romaji:
+                tokens["title.romaji"] = self._san(romaji)
+            if english:
+                tokens["title.english"] = self._san(english)
+            if self._title_pref == "english" and english:
+                tokens["title"] = self._san(english)
+            elif romaji:
+                tokens["title"] = self._san(romaji)
+            year = root_cache.get("year", 0) or 0
+            if year:
+                tokens["year"] = str(year)
+        rendered = self._san(self._folder_tmpl.render(tokens))
+        if not rendered:
+            rendered = re.sub(r'[<>:"/\\|?*]', "", display_title).strip()
+        return rendered
+
     async def _analyze_full_restructure(
         self,
         shows: list[ShowInput],
@@ -1516,6 +1565,23 @@ class LibraryRestructurer:
             parent_dir = self._resolve_output_dir(
                 output_dir, si.anilist_format, si.local_path
             )
+
+            # Nest a lone franchise entry (e.g. a movie whose TV seasons live
+            # elsewhere / aren't in this scan) under the series-group ROOT
+            # folder so it sits beside its siblings (Structure A) instead of in
+            # a separate top-level directory.
+            _grp_id = standalone_group_id.get(si.anilist_id)
+            if _grp_id:
+                _root_row = await self._db.fetch_one(
+                    "SELECT root_anilist_id FROM series_groups WHERE id=?",
+                    (_grp_id,),
+                )
+                _root_id = (_root_row or {}).get("root_anilist_id") or 0
+                if _root_id and _root_id != si.anilist_id:
+                    _root_folder = await self._render_group_root_folder(_grp_id)
+                    if _root_folder and _root_folder != rendered_folder:
+                        parent_dir = os.path.join(parent_dir, _root_folder)
+
             target_folder = os.path.join(parent_dir, rendered_folder)
 
             if not os.path.isdir(si.local_path):
