@@ -32,6 +32,9 @@ class ArrPostProcessor:
         self._db = db
         self._config = config
         self._app_state = app_state
+        # Per-run memo of franchise-root resolution (anilist_id -> root id) so a
+        # per-file reprocess loop doesn't re-walk the PREQUEL chain repeatedly.
+        self._root_cache: dict[int, int] = {}
 
     def _schedule_media_server_sync(self) -> None:
         """Queue a debounced Plex/Jellyfin refresh + metadata apply.
@@ -941,16 +944,20 @@ class ArrPostProcessor:
         always uses this entry's own titles (for the season subfolder).
 
         If no series group exists, both dicts are identical.
+
+        The root is resolved via the series group when it already traces to a
+        distinct root, else by walking the PREQUEL chain to the franchise base
+        — so a self-rooted/stale group can't strand an entry (e.g. a Demon
+        Slayer movie tracked in Sonarr) in a top-level folder.
         """
         entry_info = await self._get_anilist_title_info(anilist_id)
 
-        group = await self._db.get_series_group_by_anilist_id(anilist_id)
-        if group:
-            root_id = group.get("root_anilist_id")
-            if root_id and root_id != anilist_id:
-                root_info = await self._get_anilist_title_info(root_id)
-                if root_info["title"]:
-                    return root_info, entry_info
+        root_id = await self._resolve_franchise_root(anilist_id)
+        if root_id and root_id != anilist_id:
+            await self._ensure_metadata_cached(root_id)
+            root_info = await self._get_anilist_title_info(root_id)
+            if root_info["title"]:
+                return root_info, entry_info
 
         return entry_info, entry_info
 
@@ -964,7 +971,8 @@ class ArrPostProcessor:
         movie_info = await self._get_anilist_title_info(anilist_id)
         movie_dir = await self._get_folder_name(movie_info)
 
-        root_id = await self._resolve_franchise_root(anilist_id)
+        # Radarr entries are always movies — always allow the prequel walk.
+        root_id = await self._resolve_franchise_root(anilist_id, force_walk=True)
         if root_id and root_id != anilist_id:
             # Make sure the root's title/year are cached so the folder renders
             # the same name as the metadata writer's master folder.
@@ -976,31 +984,70 @@ class ArrPostProcessor:
                     return Path(root_dir) / movie_dir
         return Path(movie_dir)
 
-    async def _resolve_franchise_root(self, anilist_id: int) -> int:
-        """Resolve the franchise ROOT AniList id for nesting a movie.
+    async def _resolve_franchise_root(
+        self, anilist_id: int, force_walk: bool = False
+    ) -> int:
+        """Resolve the franchise ROOT AniList id for nesting an entry.
 
         Trusts the series group when it already traces to a distinct root;
         otherwise walks the PREQUEL chain back to the base (e.g. a Demon Slayer
         movie → base TV season) so a stale/self-rooted group can't strand the
-        movie in a top-level folder.
+        entry in a top-level folder.
+
+        The prequel walk only runs for MOVIE-format entries (or when
+        ``force_walk`` is set, as on the always-a-movie Radarr path).  TV
+        entries keep the series-group behaviour so a normal multi-cour show
+        isn't split when a new episode arrives.
         """
+        if anilist_id in self._root_cache:
+            return self._root_cache[anilist_id]
+
         group = await self._db.get_series_group_by_anilist_id(anilist_id)
         if group and group.get("root_anilist_id"):
             root = int(group["root_anilist_id"])
             if root != anilist_id:
+                self._root_cache[anilist_id] = root
                 return root
-        anilist_client = getattr(self._app_state, "anilist_client", None)
-        if anilist_client is None:
-            return anilist_id
-        try:
-            from src.Utils.NamingTranslator import resolve_franchise_root_id
 
-            return await resolve_franchise_root_id(anilist_id, anilist_client)
-        except Exception as exc:
-            logger.warning(
-                "Prequel-root walk failed for anilist_id=%d: %s", anilist_id, exc
-            )
-            return anilist_id
+        resolved = anilist_id
+        should_walk = force_walk
+        if not should_walk:
+            from src.Utils.NamingTranslator import is_movie_format
+
+            fmt = await self._get_entry_format(anilist_id)
+            should_walk = is_movie_format(fmt)
+
+        if should_walk:
+            anilist_client = getattr(self._app_state, "anilist_client", None)
+            if anilist_client is not None:
+                try:
+                    from src.Utils.NamingTranslator import resolve_franchise_root_id
+
+                    resolved = await resolve_franchise_root_id(
+                        anilist_id, anilist_client
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Prequel-root walk failed for anilist_id=%d: %s",
+                        anilist_id,
+                        exc,
+                    )
+        self._root_cache[anilist_id] = resolved
+        return resolved
+
+    async def _get_entry_format(self, anilist_id: int) -> str:
+        """Return the AniList format (e.g. MOVIE/TV) from the user's watchlist."""
+        try:
+            users = await self._db.get_users_by_service("anilist")
+            if users:
+                entry = await self._db.get_watchlist_entry(
+                    users[0]["user_id"], anilist_id
+                )
+                if entry and entry.get("anilist_format"):
+                    return str(entry["anilist_format"])
+        except Exception:
+            logger.debug("format lookup failed for anilist_id=%d", anilist_id)
+        return ""
 
     async def _ensure_series_group(self, anilist_id: int) -> None:
         """Build the series group for an entry if one isn't cached yet.

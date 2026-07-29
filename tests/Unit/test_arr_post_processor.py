@@ -661,7 +661,7 @@ def _wire_movie_relative_dir(
     async def title_info(anilist_id: int) -> dict:
         return _title_info(title=titles.get(anilist_id, ""))
 
-    async def resolve_root(anilist_id: int) -> int:
+    async def resolve_root(anilist_id: int, force_walk: bool = False) -> int:
         return root_id
 
     processor._get_anilist_title_info = title_info  # type: ignore[assignment]
@@ -699,6 +699,81 @@ async def test_movie_relative_dir_flat_when_root_matches_movie() -> None:
     )
     rel = await processor._get_movie_relative_dir(55)
     assert str(rel) == "Demon Slayer"
+
+
+# ---------------------------------------------------------------------------
+# Franchise-root resolution gating (_resolve_franchise_root)
+# ---------------------------------------------------------------------------
+
+
+def _make_root_db(group_root: int | None, fmt: str) -> MagicMock:
+    db = MagicMock()
+
+    async def get_series_group_by_anilist_id(anilist_id: int):
+        if group_root is None:
+            return None
+        return {"root_anilist_id": group_root}
+
+    async def get_users_by_service(service: str):
+        return [{"user_id": "u1"}]
+
+    async def get_watchlist_entry(user_id: str, anilist_id: int):
+        return {"anilist_format": fmt}
+
+    db.get_series_group_by_anilist_id = get_series_group_by_anilist_id
+    db.get_users_by_service = get_users_by_service
+    db.get_watchlist_entry = get_watchlist_entry
+    return db
+
+
+@pytest.mark.asyncio
+async def test_franchise_root_walks_for_movie_without_group() -> None:
+    """A MOVIE entry with no distinct group root walks the prequel chain."""
+    db = _make_root_db(group_root=None, fmt="MOVIE")
+    app_state = MagicMock()
+    app_state.anilist_client = MagicMock()
+    processor = ArrPostProcessor(
+        db=db, config=_config_with_anilist(), app_state=app_state
+    )
+    with patch(
+        "src.Utils.NamingTranslator.resolve_franchise_root_id",
+        new=AsyncMock(return_value=999),
+    ) as walk:
+        root = await processor._resolve_franchise_root(55)
+    assert root == 999
+    walk.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_franchise_root_skips_walk_for_tv() -> None:
+    """A TV entry with no distinct group root does NOT walk (keeps behaviour)."""
+    db = _make_root_db(group_root=None, fmt="TV")
+    app_state = MagicMock()
+    app_state.anilist_client = MagicMock()
+    processor = ArrPostProcessor(
+        db=db, config=_config_with_anilist(), app_state=app_state
+    )
+    with patch(
+        "src.Utils.NamingTranslator.resolve_franchise_root_id",
+        new=AsyncMock(return_value=999),
+    ) as walk:
+        root = await processor._resolve_franchise_root(55)
+    assert root == 55
+    walk.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_franchise_root_uses_group_root_directly() -> None:
+    """When the group already traces to a distinct root, use it (no walk)."""
+    db = _make_root_db(group_root=101, fmt="TV")
+    processor = ArrPostProcessor(db=db, config=_config_with_anilist())
+    with patch(
+        "src.Utils.NamingTranslator.resolve_franchise_root_id",
+        new=AsyncMock(return_value=999),
+    ) as walk:
+        root = await processor._resolve_franchise_root(55)
+    assert root == 101
+    walk.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
