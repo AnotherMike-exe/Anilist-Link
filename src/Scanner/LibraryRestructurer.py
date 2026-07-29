@@ -146,6 +146,51 @@ def _delete_support_files(directory: str) -> int:
     return deleted
 
 
+def _dir_has_media(directory: str) -> bool:
+    """Return True if *directory* (recursively) holds any video/subtitle file."""
+    for _root, _dirs, _files in os.walk(directory):
+        if any(os.path.splitext(f)[1].lower() in _MEDIA_EXTS for f in _files):
+            return True
+    return False
+
+
+def prune_orphaned_dir(directory: str, protected: "list[str] | None" = None) -> bool:
+    """Remove *directory* if it no longer holds any media (video/subtitle) files.
+
+    Deletes leftover support files (nfo/artwork) first, then removes the now
+    media-free tree.  This is the shared cleanup used after a file is moved out
+    of its old location so media servers don't index orphaned folders full of
+    stale posters/nfos.
+
+    ``protected`` paths (and any directory that is an ANCESTOR of one) are never
+    removed — pass the new target directory, its parents, and the library/root
+    folders so the move destination and roots stay safe.  Returns True if the
+    directory was removed.
+    """
+    if not directory or not os.path.isdir(directory):
+        return False
+
+    real = os.path.realpath(directory)
+    protected_reals = {os.path.realpath(p) for p in (protected or []) if p}
+    for p in protected_reals:
+        # Skip if this dir IS a protected path or an ancestor of one (deleting
+        # it would take the move target / a root down with it).
+        if real == p or p.startswith(real + os.sep):
+            return False
+
+    if _dir_has_media(real):
+        return False
+
+    _delete_support_files(real)
+    try:
+        shutil.rmtree(real)
+        logger.info("Pruned orphaned source folder: %s", real)
+        return True
+    except OSError as exc:
+        logger.warning("Could not prune orphaned folder %s: %s", real, exc)
+        return False
+
+
 def _xml_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 

@@ -307,6 +307,11 @@ class ArrPostProcessor:
         finally:
             await radarr.close()
 
+        # Remove the movie's old folder so we don't orphan stale nfo/artwork
+        self._prune_orphan_source(
+            local_current, str(local_root / rel_dir), str(local_root)
+        )
+
         self._schedule_media_server_sync()
 
     # ------------------------------------------------------------------
@@ -681,6 +686,7 @@ class ArrPostProcessor:
 
             moved = skipped = errors = 0
             movie_path_updated = False
+            orphan_sources: list[str] = []
 
             for mf in movie_files:
                 file_id = mf.get("id", 0)
@@ -705,6 +711,8 @@ class ArrPostProcessor:
                     errors += 1
                     continue
 
+                orphan_sources.append(local_current)
+
                 # Update movie path in Radarr once
                 if not movie_path_updated:
                     arr_movie_path = self._to_arr(
@@ -725,6 +733,12 @@ class ArrPostProcessor:
                         )
                     movie_path_updated = True
                 moved += 1
+
+            # Remove each moved file's old folder if nothing but stale metadata
+            # remains, so we don't orphan the previous movie directory.
+            target_dir = str(local_root / rel_dir)
+            for src in orphan_sources:
+                self._prune_orphan_source(src, target_dir, str(local_root))
 
             # Always rescan so Radarr discovers files at their current paths
             try:
@@ -1011,6 +1025,24 @@ class ArrPostProcessor:
             "title_english": english,
             "year": year,
         }
+
+    @staticmethod
+    def _prune_orphan_source(local_current: str, *protected: str) -> None:
+        """Remove the moved file's old folder if no media remains there.
+
+        Reuses the restructurer's cleanup so a move leaves behind no orphaned
+        folder full of stale nfo/artwork.  ``protected`` guards the move target
+        and library root from deletion.  Best-effort — never blocks the move.
+        """
+        try:
+            from src.Scanner.LibraryRestructurer import prune_orphaned_dir
+
+            old_dir = str(Path(local_current).parent)
+            prune_orphaned_dir(old_dir, list(protected))
+        except Exception:
+            logger.debug(
+                "Orphan-source prune failed for %s", local_current, exc_info=True
+            )
 
     @staticmethod
     def _move_file(src: str, dst: str) -> bool:
