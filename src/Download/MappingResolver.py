@@ -247,13 +247,17 @@ class MappingResolver:
         search_immediately: bool = False,
         tags: list[int] | None = None,
         tvdb_id_override: int | None = None,
+        tmdb_id_override: int | None = None,
         use_title_chain: bool = True,
     ) -> AddResult:
         """Resolve IDs and add entry to the appropriate *arr service."""
         title = get_preferred_title(anilist_media)
 
         if is_movie_format(anilist_format):
-            tmdb_id = await resolve_tmdb_id(anilist_id, self._anilist)
+            if tmdb_id_override:
+                tmdb_id: int | None = tmdb_id_override
+            else:
+                tmdb_id = await resolve_tmdb_id(anilist_id, self._anilist)
             if not tmdb_id:
                 logger.warning(
                     "Could not resolve TMDB ID for anilist_id=%d title=%r",
@@ -270,6 +274,8 @@ class MappingResolver:
                         f"Could not resolve TMDB ID for anilist_id={anilist_id}"
                         f" ({title!r}). Check that AniList has a TMDB external link."
                     ),
+                    needs_disambiguation=True,
+                    disambiguation_candidates=[],
                 )
             return await self.add_to_radarr(
                 anilist_id=anilist_id,

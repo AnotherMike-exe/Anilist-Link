@@ -268,6 +268,88 @@ async def sonarr_lookup(request: Request) -> JSONResponse:
     return JSONResponse({"candidates": candidates[:8]})
 
 
+def _radarr_candidate(r: dict) -> dict:
+    """Normalize a Radarr movie/lookup object into a disambiguation candidate."""
+    poster = r.get("remotePoster") or (
+        r["images"][0].get("remoteUrl", "") if r.get("images") else ""
+    )
+    return {
+        "tmdb_id": r.get("tmdbId"),
+        "title": r.get("title", ""),
+        "year": r.get("year"),
+        "status": r.get("status", ""),
+        "overview": (r.get("overview") or "")[:200],
+        "remote_poster": poster,
+    }
+
+
+@router.get("/api/watchlist/radarr-lookup")
+async def radarr_lookup(request: Request) -> JSONResponse:
+    """Search Radarr's movie lookup for disambiguation candidates.
+
+    Query params: q (title to search)
+    """
+    config = request.app.state.config
+    q = request.query_params.get("q", "").strip()
+    if not q:
+        return JSONResponse({"error": "q is required"}, status_code=400)
+    if not config.radarr.url or not config.radarr.api_key:
+        return JSONResponse({"error": "Radarr not configured"}, status_code=503)
+
+    client = RadarrClient(url=config.radarr.url, api_key=config.radarr.api_key)
+    try:
+        results = await client.lookup_movie(q)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    finally:
+        await client.close()
+
+    candidates = [_radarr_candidate(r) for r in results if r.get("tmdbId")]
+    return JSONResponse({"candidates": candidates[:8]})
+
+
+async def _radarr_title_candidates(
+    radarr_client: RadarrClient,
+    anilist_client: Any,
+    anilist_id: int,
+    primary_title: str,
+) -> list[dict]:
+    """Search Radarr by the AniList title chain and return movie candidates.
+
+    Used to seed the disambiguation picker when AniList has no TMDB link.
+    """
+    titles: list[str] = [primary_title] if primary_title else []
+    try:
+        media_data = await anilist_client._execute_query(
+            GET_FULL_MEDIA_QUERY, {"id": anilist_id}
+        )
+        full_media = media_data.get("Media", {})
+        if full_media:
+            chain = [t for t in build_title_chain(full_media) if t and len(t) > 2]
+            if chain:
+                titles = chain
+    except Exception as exc:
+        logger.debug("Could not build title chain for radarr lookup: %s", exc)
+
+    seen: set[int] = set()
+    out: list[dict] = []
+    for term in titles:
+        try:
+            results = await radarr_client.lookup_movie(term)
+        except Exception as exc:
+            logger.debug("Radarr lookup failed for %r: %s", term, exc)
+            continue
+        for r in results:
+            tid = r.get("tmdbId")
+            if not tid or tid in seen:
+                continue
+            seen.add(tid)
+            out.append(_radarr_candidate(r))
+        if len(out) >= 8:
+            break
+    return out[:8]
+
+
 async def _auto_link_sonarr_siblings(
     db: Any,
     anilist_client: Any,
@@ -539,6 +621,7 @@ async def add_to_arr(request: Request) -> JSONResponse:
         return JSONResponse({"error": "anilist_id required"}, status_code=400)
 
     tvdb_id_override: int | None = int(body["tvdb_id"]) if body.get("tvdb_id") else None
+    tmdb_id_override: int | None = int(body["tmdb_id"]) if body.get("tmdb_id") else None
     monitor_strategy: str = str(body.get("monitor_strategy") or "future")
     valid_strategies = {
         "future",
@@ -591,6 +674,7 @@ async def add_to_arr(request: Request) -> JSONResponse:
             search_immediately=True,
             tags=tags,
             tvdb_id_override=tvdb_id_override,
+            tmdb_id_override=tmdb_id_override,
         )
 
         # Auto-link sequels/prequels that share the same Sonarr series
@@ -996,16 +1080,24 @@ async def resolve_arr_match(request: Request) -> JSONResponse:
 
         from src.Utils.NamingTranslator import resolve_tmdb_id
 
+        client_r = RadarrClient(url=config.radarr.url, api_key=config.radarr.api_key)
         tmdb_id = await resolve_tmdb_id(anilist_id, anilist_client)
         if not tmdb_id:
+            try:
+                candidates = await _radarr_title_candidates(
+                    client_r, anilist_client, anilist_id, anilist_title
+                )
+            finally:
+                await client_r.close()
             return JSONResponse(
                 {
                     "resolved": False,
-                    "error": f"Could not resolve TMDB ID for {anilist_title!r}",
+                    "needs_disambiguation": True,
+                    "service": "radarr",
+                    "candidates": candidates,
                 }
             )
 
-        client_r = RadarrClient(url=config.radarr.url, api_key=config.radarr.api_key)
         try:
             result = await client_r.lookup_movie_by_tmdb(tmdb_id)
             if not result:
@@ -1056,7 +1148,7 @@ async def resolve_arr_match(request: Request) -> JSONResponse:
     client_s = SonarrClient(url=config.sonarr.url, api_key=config.sonarr.api_key)
     try:
         tvdb_id = await resolve_tvdb_id(anilist_id, anilist_client)
-        candidates: list[dict] = []
+        candidates = []
 
         if not tvdb_id:
             # Try walking PREQUEL relations to find root entry with TVDB link
@@ -1197,21 +1289,34 @@ async def resolve_arr_match_stream(request: Request) -> StreamingResponse:
 
                 from src.Utils.NamingTranslator import resolve_tmdb_id
 
+                client_r = RadarrClient(
+                    url=config.radarr.url, api_key=config.radarr.api_key
+                )
                 tmdb_id = await resolve_tmdb_id(anilist_id, anilist_client)
                 if not tmdb_id:
+                    # No TMDB link on AniList \u2014 offer manual Radarr disambiguation
+                    yield _sse(
+                        "status",
+                        {"text": "Searching Radarr by title variants\u2026"},
+                    )
+                    try:
+                        candidates = await _radarr_title_candidates(
+                            client_r, anilist_client, anilist_id, anilist_title
+                        )
+                    finally:
+                        await client_r.close()
                     yield _sse(
                         "result",
                         {
                             "resolved": False,
-                            "error": f"Could not resolve TMDB ID for {anilist_title!r}",
+                            "needs_disambiguation": True,
+                            "service": "radarr",
+                            "candidates": candidates,
                         },
                     )
                     return
 
                 yield _sse("status", {"text": "Looking up in Radarr\u2026"})
-                client_r = RadarrClient(
-                    url=config.radarr.url, api_key=config.radarr.api_key
-                )
                 try:
                     result = await client_r.lookup_movie_by_tmdb(tmdb_id)
                     if not result:

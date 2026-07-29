@@ -1030,8 +1030,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       : 'Add to ' + label;
     confirmBtn.disabled = false;
 
-    document.getElementById('matchPickDifferent').style.display =
-      (_preview.service === 'radarr') ? 'none' : '';
+    document.getElementById('matchPickDifferent').style.display = '';
 
     document.getElementById('matchPreviewModal').classList.remove('hidden');
   };
@@ -1056,6 +1055,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     var monitorMode = document.getElementById('matchMonitorMode').value;
     var body = { anilist_id: _preview.anilistId, monitor_strategy: monitorMode };
     if (_preview.tvdbId) body.tvdb_id = _preview.tvdbId;
+    if (_preview.tmdbId) body.tmdb_id = _preview.tmdbId;
 
     fetch('/api/library/add-to-arr', {
       method: 'POST',
@@ -1100,6 +1100,9 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     _disambig.service = service || 'sonarr';
     _disambig.selectedTvdbId = null;
 
+    var isMovie = _disambig.service === 'radarr';
+    document.getElementById('disambigTitle').textContent =
+      'Pick the correct ' + (isMovie ? 'movie' : 'series');
     document.getElementById('disambigHint').textContent =
       'Could not auto-match \u201c' + title + '\u201d on ' + _disambig.service + '. Pick the correct entry:';
     document.getElementById('disambigSearch').value = title;
@@ -1139,9 +1142,12 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       list.innerHTML = '<p style="color:var(--text-muted,#666);font-size:0.85rem;">No results found.</p>';
       return;
     }
+    var isMovie = _disambig.service === 'radarr';
+    var idLabel = isMovie ? 'TMDB' : 'TVDB';
     list.innerHTML = candidates.map(function(c) {
+      var idVal = isMovie ? c.tmdb_id : c.tvdb_id;
       var scoreLabel = c.score != null ? ' &nbsp;&middot;&nbsp; ' + c.score + '%' : '';
-      return '<div class="candidate-card" data-tvdb="' + esc(c.tvdb_id) + '" onclick="selectCandidate(this,' + c.tvdb_id + ')">' +
+      return '<div class="candidate-card" data-id="' + esc(idVal) + '" onclick="selectCandidate(this,' + idVal + ')">' +
         (c.remote_poster
           ? '<img src="' + esc(c.remote_poster) + '" class="candidate-poster" loading="lazy" onerror="this.style.display=\'none\'">'
           : '<div class="candidate-poster-ph"></div>') +
@@ -1150,7 +1156,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
           '<div class="candidate-meta">' +
             (c.year ? c.year + ' &nbsp;&middot;&nbsp; ' : '') +
             escHtml(c.status || '') +
-            ' &nbsp;&middot;&nbsp; TVDB: ' + esc(c.tvdb_id) +
+            ' &nbsp;&middot;&nbsp; ' + idLabel + ': ' + esc(idVal) +
             scoreLabel +
           '</div>' +
           (c.overview ? '<div class="candidate-overview">' + escHtml(c.overview) + '</div>' : '') +
@@ -1163,7 +1169,10 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     if (!q.trim()) return;
     var list = document.getElementById('candidateList');
     list.innerHTML = '<p style="color:var(--text-muted,#666);font-size:0.85rem;">Searching\u2026</p>';
-    fetch('/api/watchlist/sonarr-lookup?q=' + encodeURIComponent(q))
+    var endpoint = _disambig.service === 'radarr'
+      ? '/api/watchlist/radarr-lookup'
+      : '/api/watchlist/sonarr-lookup';
+    fetch(endpoint + '?q=' + encodeURIComponent(q))
       .then(function(r) { return r.json(); })
       .then(function(data) { renderCandidates(data.candidates || []); })
       .catch(function() {
@@ -1184,10 +1193,17 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Adding\u2026';
 
+    var pickBody = { anilist_id: _disambig.anilistId };
+    if (_disambig.service === 'radarr') {
+      pickBody.tmdb_id = _disambig.selectedTvdbId;
+    } else {
+      pickBody.tvdb_id = _disambig.selectedTvdbId;
+    }
+
     fetch('/api/library/add-to-arr', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ anilist_id: _disambig.anilistId, tvdb_id: _disambig.selectedTvdbId })
+      body: JSON.stringify(pickBody)
     }).then(function(r) { return r.json(); })
       .then(function(data) {
         document.getElementById('disambigModal').classList.add('hidden');
@@ -1427,6 +1443,34 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     }
   };
 
+  // Copy helper that works on non-secure (plain HTTP LAN) origins too, where
+  // navigator.clipboard is undefined. Falls back to a hidden-textarea execCommand.
+  function copyTextToClipboard(text, onDone) {
+    function finish() { if (typeof onDone === 'function') onDone(); }
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(finish, function() { legacyCopy(text, finish); });
+    } else {
+      legacyCopy(text, finish);
+    }
+  }
+
+  function legacyCopy(text, finish) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      finish();
+    } catch (_) { /* clipboard unavailable */ }
+  }
+
   function showToast(msg, type) {
     var container = document.getElementById('toastContainer');
     var toast = document.createElement('div');
@@ -1445,8 +1489,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     copyBtn.style.cssText = 'background:none;border:none;cursor:pointer;color:inherit;opacity:0.9;font-size:0.95rem;padding:0 0.15rem;line-height:1';
     copyBtn.onclick = function(e) {
       e.stopPropagation();
-      if (!navigator.clipboard) return;
-      navigator.clipboard.writeText(msg).then(function() {
+      copyTextToClipboard(msg, function() {
         copyBtn.textContent = '✓';
         setTimeout(function() { copyBtn.textContent = '📋'; }, 1200);
       });
