@@ -288,10 +288,15 @@
                   onclick="previewAdd({{ aid }}, '{{ entry.anilist_title|e }}', this)"
                   title="Add to Sonarr/Radarr">+ Add</button>
           {% endif %}
-          {% if entry.folder_path and entry.arr_status == 'untracked' %}
+          {# Offer the filesystem Smart Move whenever the item is on disk but
+             *arr isn't managing an actual file for it (untracked, or linked
+             with no downloaded file — e.g. a movie whose file came from
+             elsewhere). When *arr owns the file, its own "Move to Library"
+             is the correct tool instead. #}
+          {% if entry.folder_path and not entry.arr_has_file %}
           <button class="btn btn-secondary btn-xs"
                   onclick="openSmartMoveWl({{ aid }}, this)"
-                  title="Move this library folder into its standardized location">Fix Location</button>
+                  title="Move this on-disk folder into its standardized library location (does not require Sonarr/Radarr)">Fix Location</button>
           {% endif %}
         </div>
       </td>
