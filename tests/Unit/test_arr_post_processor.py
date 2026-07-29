@@ -637,3 +637,66 @@ async def test_resolve_series_level_when_no_season_table() -> None:
     processor = ArrPostProcessor(db=db, config=_config_with_anilist())
     aid = await processor._resolve_sonarr_anilist_id(42, 1)
     assert aid == 321
+
+
+# ---------------------------------------------------------------------------
+# Movie folder nesting (series-group awareness)
+# ---------------------------------------------------------------------------
+
+
+def _folder_by_title(title_info: dict) -> str:
+    """Fake _get_folder_name: return a folder derived from the info's title."""
+    return title_info["title"]
+
+
+@pytest.mark.asyncio
+async def test_movie_relative_dir_nests_under_group_root() -> None:
+    """A grouped movie nests under the group ROOT folder (Demon Slayer/...)."""
+    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+
+    show_info = _title_info(title="Demon Slayer")
+    movie_info = _title_info(title="Infinity Castle")
+
+    async def show_and_season(anilist_id: int) -> tuple[dict, dict]:
+        return show_info, movie_info  # distinct objects → grouped
+
+    processor._get_show_and_season_info = show_and_season  # type: ignore[assignment]
+    processor._get_folder_name = AsyncMock(side_effect=_folder_by_title)  # type: ignore[method-assign]
+
+    rel = await processor._get_movie_relative_dir(123)
+    assert str(rel) == "Demon Slayer/Infinity Castle"
+
+
+@pytest.mark.asyncio
+async def test_movie_relative_dir_flat_when_standalone() -> None:
+    """A standalone movie (no group) stays in a flat single folder."""
+    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+
+    info = _title_info(title="Some Movie")
+
+    async def show_and_season(anilist_id: int) -> tuple[dict, dict]:
+        return info, info  # same object → not grouped
+
+    processor._get_show_and_season_info = show_and_season  # type: ignore[assignment]
+    processor._get_folder_name = AsyncMock(side_effect=_folder_by_title)  # type: ignore[method-assign]
+
+    rel = await processor._get_movie_relative_dir(123)
+    assert str(rel) == "Some Movie"
+
+
+@pytest.mark.asyncio
+async def test_movie_relative_dir_flat_when_root_matches_movie() -> None:
+    """No duplicate nesting when root and movie render the same folder name."""
+    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+
+    show_info = _title_info(title="Demon Slayer")
+    movie_info = _title_info(title="Demon Slayer")
+
+    async def show_and_season(anilist_id: int) -> tuple[dict, dict]:
+        return show_info, movie_info
+
+    processor._get_show_and_season_info = show_and_season  # type: ignore[assignment]
+    processor._get_folder_name = AsyncMock(side_effect=_folder_by_title)  # type: ignore[method-assign]
+
+    rel = await processor._get_movie_relative_dir(123)
+    assert str(rel) == "Demon Slayer"

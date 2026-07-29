@@ -257,7 +257,8 @@ class ArrPostProcessor:
 
         original_name = Path(current_path).name
         filename = await self._get_movie_file_name(original_name, title_info)
-        safe_dir = await self._get_folder_name(title_info)
+        await self._ensure_series_group(anilist_id)
+        rel_dir = await self._get_movie_relative_dir(anilist_id)
 
         # Use library output path as target root; fall back to Radarr movie root
         library_path = await self._get_library_output_path(anilist_format="MOVIE")
@@ -277,7 +278,7 @@ class ArrPostProcessor:
 
         local_root = Path(self._to_local(target_root, arr_prefix, local_prefix))
         local_current = self._to_local(current_path, arr_prefix, local_prefix)
-        local_target = str(local_root / safe_dir / filename)
+        local_target = str(local_root / rel_dir / filename)
 
         if Path(local_target).resolve() == Path(local_current).resolve():
             logger.debug("Radarr file already at target path: %s", current_path)
@@ -287,7 +288,7 @@ class ArrPostProcessor:
             return
 
         arr_movie_path = self._to_arr(
-            str(local_root / safe_dir), arr_prefix, local_prefix
+            str(local_root / rel_dir), arr_prefix, local_prefix
         )
         radarr = RadarrClient(
             url=self._config.radarr.url, api_key=self._config.radarr.api_key
@@ -639,7 +640,8 @@ class ArrPostProcessor:
                 )
                 target_root = str(arr_root)
             local_root = Path(self._to_local(target_root, arr_prefix, local_prefix))
-            safe_dir = await self._get_folder_name(title_info)
+            await self._ensure_series_group(anilist_id)
+            rel_dir = await self._get_movie_relative_dir(anilist_id)
 
             if dry_run:
                 plan: list[dict[str, Any]] = []
@@ -656,7 +658,7 @@ class ArrPostProcessor:
                     local_current = self._to_local(
                         arr_current, arr_prefix, local_prefix
                     )
-                    local_target = str(local_root / safe_dir / filename)
+                    local_target = str(local_root / rel_dir / filename)
                     arr_target = self._to_arr(local_target, arr_prefix, local_prefix)
 
                     already_at_target = (
@@ -667,7 +669,7 @@ class ArrPostProcessor:
                             "file_id": file_id,
                             "anilist_id": anilist_id,
                             "anilist_title": title_info["title"],
-                            "folder_name": safe_dir,
+                            "folder_name": str(rel_dir),
                             "arr_from": arr_current,
                             "arr_to": arr_target,
                             "local_from": local_current,
@@ -689,7 +691,7 @@ class ArrPostProcessor:
                 original_name = Path(arr_current).name
                 filename = await self._get_movie_file_name(original_name, title_info)
                 local_current = self._to_local(arr_current, arr_prefix, local_prefix)
-                local_target = str(local_root / safe_dir / filename)
+                local_target = str(local_root / rel_dir / filename)
 
                 if Path(local_target).resolve() == Path(local_current).resolve():
                     skipped += 1
@@ -706,7 +708,7 @@ class ArrPostProcessor:
                 # Update movie path in Radarr once
                 if not movie_path_updated:
                     arr_movie_path = self._to_arr(
-                        str(local_root / safe_dir), arr_prefix, local_prefix
+                        str(local_root / rel_dir), arr_prefix, local_prefix
                     )
                     try:
                         await radarr.update_movie_path(radarr_id, arr_movie_path)
@@ -919,6 +921,49 @@ class ArrPostProcessor:
                     return root_info, entry_info
 
         return entry_info, entry_info
+
+    async def _get_movie_relative_dir(self, anilist_id: int) -> Path:
+        """Return a Radarr movie's folder path relative to the library root.
+
+        Mirrors the Sonarr layout: when the movie belongs to a series group,
+        it is nested under the group ROOT folder (e.g. ``Demon Slayer/Infinity
+        Castle``); otherwise it lands in a flat ``<movie folder>``.
+        """
+        show_info, movie_info = await self._get_show_and_season_info(anilist_id)
+        movie_dir = await self._get_folder_name(movie_info)
+        # _get_show_and_season_info returns the same object for both when the
+        # entry is not part of a multi-entry group — nest only when it is.
+        if show_info is not movie_info:
+            show_dir = await self._get_folder_name(show_info)
+            if show_dir and show_dir != movie_dir:
+                return Path(show_dir) / movie_dir
+        return Path(movie_dir)
+
+    async def _ensure_series_group(self, anilist_id: int) -> None:
+        """Build the series group for an entry if one isn't cached yet.
+
+        Radarr adds don't populate series groups (only the Sonarr sibling
+        auto-link does), so a movie may have no group on record — which would
+        flatten its library folder instead of nesting it under the group root
+        (e.g. ``Demon Slayer/Infinity Castle``).  Build one on demand when the
+        AniList client is reachable via app_state.  Best-effort: any failure
+        leaves the movie in a flat folder rather than blocking the move.
+        """
+        try:
+            if await self._db.get_series_group_by_anilist_id(anilist_id):
+                return
+            anilist_client = getattr(self._app_state, "anilist_client", None)
+            if anilist_client is None:
+                return
+            from src.Scanner.SeriesGroupBuilder import SeriesGroupBuilder
+
+            builder = SeriesGroupBuilder(db=self._db, anilist_client=anilist_client)
+            await builder.get_or_build_group(anilist_id)
+            logger.info("Built series group on demand for anilist_id=%d", anilist_id)
+        except Exception as exc:
+            logger.warning(
+                "Could not ensure series group for anilist_id=%d: %s", anilist_id, exc
+            )
 
     async def _get_anilist_title_and_year(self, anilist_id: int) -> tuple[str, int]:
         """Return the best available (title, year) for an AniList entry."""
