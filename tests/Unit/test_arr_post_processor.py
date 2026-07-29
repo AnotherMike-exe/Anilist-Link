@@ -678,7 +678,8 @@ async def test_movie_relative_dir_nests_under_franchise_root() -> None:
         processor, root_id=101, titles={55: "Infinity Castle", 101: "Demon Slayer"}
     )
     rel = await processor._get_movie_relative_dir(55)
-    assert str(rel) == "Demon Slayer/Infinity Castle"
+    # No year on the stub info → the collision-safe backup appends [Movie].
+    assert str(rel) == "Demon Slayer/Infinity Castle [Movie]"
 
 
 @pytest.mark.asyncio
@@ -840,3 +841,73 @@ async def test_ensure_metadata_cached_noop_when_year_present() -> None:
     )
     await processor._ensure_metadata_cached(123)
     anilist.get_anime_by_id.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Movie subfolder + collision-safe disambiguation
+# ---------------------------------------------------------------------------
+
+
+def test_disambiguate_keeps_folder_with_year() -> None:
+    out = ArrPostProcessor._disambiguate_movie_folder(
+        "Mugen Ressha-hen (2020)", {"year": 2020}
+    )
+    assert out == "Mugen Ressha-hen (2020)"
+
+
+def test_disambiguate_appends_year_when_missing() -> None:
+    out = ArrPostProcessor._disambiguate_movie_folder(
+        "Mugen Ressha-hen", {"year": 2020}
+    )
+    assert out == "Mugen Ressha-hen (2020)"
+
+
+def test_disambiguate_appends_movie_marker_without_year() -> None:
+    out = ArrPostProcessor._disambiguate_movie_folder("Mugen Ressha-hen", {"year": 0})
+    assert out == "Mugen Ressha-hen [Movie]"
+
+
+@pytest.mark.asyncio
+async def test_entry_subfolder_movie_nested_is_disambiguated() -> None:
+    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+
+    async def fmt(anilist_id: int) -> str:
+        return "MOVIE"
+
+    processor._get_entry_format = fmt  # type: ignore[assignment]
+    processor._get_folder_name = AsyncMock(return_value="Mugen Ressha-hen")  # type: ignore[method-assign]
+
+    show_info = _title_info(title="Demon Slayer")
+    season_info = _title_info(title="Mugen Ressha-hen", year=2020)
+    sub = await processor._get_entry_subfolder(55, 1, show_info, season_info)
+    assert sub == "Mugen Ressha-hen (2020)"
+
+
+@pytest.mark.asyncio
+async def test_entry_subfolder_movie_standalone_is_empty() -> None:
+    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+
+    async def fmt(anilist_id: int) -> str:
+        return "MOVIE"
+
+    processor._get_entry_format = fmt  # type: ignore[assignment]
+    info = _title_info(title="Some Movie", year=2020)
+    # show is season (same object) → standalone → no subfolder
+    sub = await processor._get_entry_subfolder(55, 1, info, info)
+    assert sub == ""
+
+
+@pytest.mark.asyncio
+async def test_entry_subfolder_tv_uses_season_folder() -> None:
+    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+
+    async def fmt(anilist_id: int) -> str:
+        return "TV"
+
+    processor._get_entry_format = fmt  # type: ignore[assignment]
+    processor._get_season_folder_name = AsyncMock(return_value="Season 2")  # type: ignore[method-assign]
+
+    show_info = _title_info(title="Demon Slayer")
+    season_info = _title_info(title="Mugen Train Arc", year=2021)
+    sub = await processor._get_entry_subfolder(77, 2, show_info, season_info)
+    assert sub == "Season 2"

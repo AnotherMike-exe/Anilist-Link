@@ -153,7 +153,9 @@ class ArrPostProcessor:
             original_name, season_info, season_number, episode_number
         )
         safe_dir = await self._get_folder_name(show_info)
-        season_dir = await self._get_season_folder_name(season_number, season_info)
+        season_dir = await self._get_entry_subfolder(
+            anilist_id, season_number, show_info, season_info
+        )
 
         # Path prefix translation for Docker/remote setups
         arr_prefix = self._config.sonarr.path_prefix
@@ -423,8 +425,8 @@ class ArrPostProcessor:
                         original_name, season_info, season_number, episode_number
                     )
                     safe_dir = await self._get_folder_name(show_info)
-                    season_dir = await self._get_season_folder_name(
-                        season_number, season_info
+                    season_dir = await self._get_entry_subfolder(
+                        anilist_id, season_number, show_info, season_info
                     )
 
                     local_current = self._to_local(
@@ -545,8 +547,8 @@ class ArrPostProcessor:
                     original_name, season_info, season_number, episode_number
                 )
                 safe_dir = await self._get_folder_name(show_info)
-                season_dir = await self._get_season_folder_name(
-                    season_number, season_info
+                season_dir = await self._get_entry_subfolder(
+                    anilist_id, season_number, show_info, season_info
                 )
 
                 # Paths for local move
@@ -961,6 +963,54 @@ class ArrPostProcessor:
 
         return entry_info, entry_info
 
+    @staticmethod
+    def _disambiguate_movie_folder(folder: str, title_info: dict) -> str:
+        """Ensure a nested movie folder carries a distinguishing token.
+
+        Under a shared franchise root a movie can otherwise collide with a
+        same-named TV season (e.g. the Mugen Train movie vs the Mugen Train TV
+        arc).  When the rendered folder already carries the year (the usual
+        template) it is returned unchanged; otherwise the year — or a ``[Movie]``
+        marker when no year is known — is appended as a backup.
+        """
+        if not folder:
+            return folder
+        year = title_info.get("year") or 0
+        if year:
+            if str(year) not in folder:
+                return f"{folder} ({year})"
+            return folder
+        if not folder.rstrip().lower().endswith("[movie]"):
+            return f"{folder} [Movie]"
+        return folder
+
+    async def _get_entry_subfolder(
+        self,
+        anilist_id: int,
+        season_number: int,
+        show_info: dict,
+        season_info: dict,
+    ) -> str:
+        """Return the subfolder under the show/root folder for one Sonarr entry.
+
+        - A movie nested under a franchise root gets its own (disambiguated)
+          title folder, so it can't collide with a same-named TV season.
+        - A standalone movie gets no subfolder (file sits in the show folder,
+          mirroring Radarr's flat layout).
+        - A TV entry keeps its season folder.
+        """
+        from src.Utils.NamingTranslator import is_movie_format
+
+        fmt = await self._get_entry_format(anilist_id)
+        if not is_movie_format(fmt):
+            return await self._get_season_folder_name(season_number, season_info)
+
+        # Movie: nested only when a distinct franchise root was resolved.
+        if show_info is season_info:
+            return ""
+        folder = await self._get_folder_name(season_info)
+        return self._disambiguate_movie_folder(folder, season_info)
+
     async def _get_movie_relative_dir(self, anilist_id: int) -> Path:
         """Return a Radarr movie's folder path relative to the library root.
 
@@ -981,6 +1031,9 @@ class ArrPostProcessor:
             if root_info.get("title"):
                 root_dir = await self._get_folder_name(root_info)
                 if root_dir and root_dir != movie_dir:
+                    # Guarantee the movie folder differs from any TV season
+                    # under the same root.
+                    movie_dir = self._disambiguate_movie_folder(movie_dir, movie_info)
                     return Path(root_dir) / movie_dir
         return Path(movie_dir)
 
