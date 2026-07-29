@@ -124,6 +124,10 @@ async def _get_local_items(db: Any) -> list[dict[str, Any]]:
                 virtual_entry["title_native"] = sge.get("title_native") or ""
                 virtual_entry["title_synonyms"] = sge.get("title_synonyms") or "[]"
                 virtual_entry["year"] = sge.get("anilist_year") or None
+                # Use the group MEMBER's own episode count — not the parent
+                # row's — so a franchise movie doesn't inherit the TV season's
+                # episode total (e.g. a 1-ep movie showing as 26 eps).
+                virtual_entry["episodes"] = sge.get("episodes")
                 result.append(virtual_entry)
     return result
 
@@ -219,8 +223,17 @@ def _aggregate_by_anilist_id(
                 for s in item["sources"]:
                     if s not in existing["sources"]:
                         existing["sources"].append(s)
-                # If a non-virtual item merges in, result is non-virtual
+                # If a non-virtual item merges in, its real on-disk facts
+                # (path + own episode count) are authoritative over a virtual
+                # series-group expansion that copied a parent row's values.
                 if not item.get("virtual", False):
+                    if existing.get("virtual", False):
+                        existing["folder_path"] = item.get("folder_path", "")
+                        existing["folder_name"] = item.get("folder_name", "")
+                        existing["source_id"] = item.get(
+                            "source_id", existing.get("source_id")
+                        )
+                        existing["episodes"] = item.get("episodes")
                     existing["virtual"] = False
                 # Prefer AniList cover; keep first non-null cover
                 if not existing["cover_url"] and item["cover_url"]:

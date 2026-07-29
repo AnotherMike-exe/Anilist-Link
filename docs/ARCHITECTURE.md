@@ -210,6 +210,36 @@ The recommended output structure (Structure A) is one folder per AniList entry:
 - `POST /restructure/execute` — Execute approved file moves
 - `GET /restructure/results` — Show results and any errors
 - `GET /restructure/report` — Audit log of past restructures
+- `POST /api/smart-move/preview`, `POST /api/smart-move/execute` — **Smart Move
+  (Fix Location)**: run the restructurer on a *single* library item that isn't
+  tracked in Sonarr/Radarr. Builds a one-element `ShowInput` from the
+  `library_items` row, analyzes with `force_franchise_root=True`, and (on
+  execute) relocates just that item, re-points the row + local mapping, and
+  triggers a media-server refresh. Surfaced as a per-item "Fix Location" button
+  on the Library detail and watchlist pages.
+
+### 4.6. Franchise-root nesting for movies
+
+A franchise movie (e.g. a Demon Slayer film) should nest under its series-group
+ROOT folder alongside the TV seasons (Structure A), not sit in a separate
+top-level directory. Both movers resolve the franchise root the same way:
+
+1. Use the series group's `root_anilist_id` when it already traces to a
+   *distinct* root.
+2. Otherwise walk the AniList **PREQUEL** chain back to the base
+   (`resolve_franchise_root_id` in `NamingTranslator`) — this recovers the root
+   even when the stored group is stale/self-rooted.
+
+- **Restructurer** (`LibraryRestructurer._analyze_full_restructure`): a lone
+  franchise entry nests under the rendered root folder; the walk is gated to
+  MOVIE format during a full library pass but forced for the single-item Smart
+  Move. A relocation to a new parent counts as a change even when the folder
+  name is unchanged (full-path comparison, not basename).
+- **Arr post-processor** (`ArrPostProcessor`): Sonarr/Radarr "Move to Library"
+  nests the movie under the root, gives it its own title folder (not a season
+  folder) with a collision-safe backup so it can't clash with a same-named TV
+  season, backfills the root's cached year, writes the group `tvshow.nfo`, and
+  prunes the orphaned source folder (`prune_orphaned_dir`).
 
 ---
 
