@@ -258,6 +258,12 @@ class ArrPostProcessor:
         original_name = Path(current_path).name
         filename = await self._get_movie_file_name(original_name, title_info)
         await self._ensure_series_group(anilist_id)
+        # Ensure the movie + group root have a cached year so the folder names
+        # match the metadata writer's (e.g. "Demon Slayer (2019)").
+        root_id = await self._resolve_group_root_id(anilist_id)
+        await self._ensure_metadata_cached(anilist_id)
+        if root_id != anilist_id:
+            await self._ensure_metadata_cached(root_id)
         rel_dir = await self._get_movie_relative_dir(anilist_id)
 
         # Use library output path as target root; fall back to Radarr movie root
@@ -311,6 +317,13 @@ class ArrPostProcessor:
         self._prune_orphan_source(
             local_current, str(local_root / rel_dir), str(local_root)
         )
+
+        # When nested under a group root, ensure the show folder carries a
+        # tvshow.nfo so Jellyfin classifies + sorts it (mirrors the Sonarr path).
+        if rel_dir.parent != Path("."):
+            await self._write_show_nfo_if_missing(
+                str(local_root / rel_dir.parent), anilist_id, title_info["title"]
+            )
 
         self._schedule_media_server_sync()
 
@@ -646,6 +659,10 @@ class ArrPostProcessor:
                 target_root = str(arr_root)
             local_root = Path(self._to_local(target_root, arr_prefix, local_prefix))
             await self._ensure_series_group(anilist_id)
+            root_id = await self._resolve_group_root_id(anilist_id)
+            await self._ensure_metadata_cached(anilist_id)
+            if root_id != anilist_id:
+                await self._ensure_metadata_cached(root_id)
             rel_dir = await self._get_movie_relative_dir(anilist_id)
 
             if dry_run:
@@ -739,6 +756,13 @@ class ArrPostProcessor:
             target_dir = str(local_root / rel_dir)
             for src in orphan_sources:
                 self._prune_orphan_source(src, target_dir, str(local_root))
+
+            # When nested under a group root, write the show folder's tvshow.nfo
+            # so Jellyfin classifies + sorts it (mirrors the Sonarr path).
+            if moved and rel_dir.parent != Path("."):
+                await self._write_show_nfo_if_missing(
+                    str(local_root / rel_dir.parent), anilist_id, title_info["title"]
+                )
 
             # Always rescan so Radarr discovers files at their current paths
             try:
@@ -978,6 +1002,72 @@ class ArrPostProcessor:
             logger.warning(
                 "Could not ensure series group for anilist_id=%d: %s", anilist_id, exc
             )
+
+    async def _ensure_metadata_cached(self, anilist_id: int) -> None:
+        """Backfill anilist_cache with the year when it's missing.
+
+        Folder naming renders ``{year}`` from the cache; when an entry (or its
+        group root) has no cached year the folder loses its ``(2019)`` suffix
+        and no longer matches the metadata writer's folder — leaving the moved
+        item in a differently-named, mis-sorted directory.  Fetch from AniList
+        and upsert the year, preserving any provider IDs already cached.
+        Best-effort — never blocks the move.
+        """
+        try:
+            cached = await self._db.get_cached_metadata(anilist_id) or {}
+            if cached.get("year"):
+                return
+            anilist_client = getattr(self._app_state, "anilist_client", None)
+            if anilist_client is None:
+                return
+            media = await anilist_client.get_anime_by_id(anilist_id)
+            if not media:
+                return
+            year = media.get("seasonYear") or (media.get("startDate") or {}).get(
+                "year"
+            )
+            if not year:
+                return
+            import json as _json
+
+            title = media.get("title") or {}
+            await self._db.set_cached_metadata(
+                anilist_id=anilist_id,
+                title_romaji=title.get("romaji") or cached.get("title_romaji") or "",
+                title_english=title.get("english")
+                or cached.get("title_english")
+                or "",
+                title_native=title.get("native") or cached.get("title_native") or "",
+                synonyms=[s for s in (media.get("synonyms") or []) if s],
+                episodes=media.get("episodes"),
+                cover_image=(media.get("coverImage") or {}).get("large", "")
+                or cached.get("cover_image")
+                or "",
+                description=media.get("description") or cached.get("description") or "",
+                genres=_json.dumps(media.get("genres") or []),
+                status=media.get("status") or cached.get("status") or "",
+                year=int(year),
+                # Preserve fields the group builder / scanner may have populated
+                rating=cached.get("rating"),
+                studio=cached.get("studio") or "",
+                imdb_id=cached.get("imdb_id") or "",
+                tvdb_id=cached.get("tvdb_id") or "",
+                tvmaze_id=cached.get("tvmaze_id") or "",
+            )
+            logger.info(
+                "Backfilled cached year=%d for anilist_id=%d", int(year), anilist_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not backfill metadata for anilist_id=%d: %s", anilist_id, exc
+            )
+
+    async def _resolve_group_root_id(self, anilist_id: int) -> int:
+        """Return the series-group ROOT anilist_id, or the entry id if ungrouped."""
+        group = await self._db.get_series_group_by_anilist_id(anilist_id)
+        if group and group.get("root_anilist_id"):
+            return int(group["root_anilist_id"])
+        return anilist_id
 
     async def _get_anilist_title_and_year(self, anilist_id: int) -> tuple[str, int]:
         """Return the best available (title, year) for an AniList entry."""

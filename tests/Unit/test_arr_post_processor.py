@@ -700,3 +700,69 @@ async def test_movie_relative_dir_flat_when_root_matches_movie() -> None:
 
     rel = await processor._get_movie_relative_dir(123)
     assert str(rel) == "Demon Slayer"
+
+
+# ---------------------------------------------------------------------------
+# Year backfill for folder naming (_ensure_metadata_cached)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ensure_metadata_cached_backfills_missing_year() -> None:
+    """When the cache has no year, fetch from AniList and upsert it."""
+    db = MagicMock()
+
+    async def get_cached_metadata(anilist_id: int):
+        return {"title_romaji": "Kimetsu no Yaiba", "year": 0, "tvdb_id": "145"}
+
+    saved: dict[str, Any] = {}
+
+    async def set_cached_metadata(**kwargs: Any) -> None:
+        saved.update(kwargs)
+
+    db.get_cached_metadata = get_cached_metadata
+    db.set_cached_metadata = set_cached_metadata
+
+    anilist = MagicMock()
+
+    async def get_anime_by_id(aid: int):
+        return {
+            "title": {"romaji": "Kimetsu no Yaiba", "english": "Demon Slayer"},
+            "seasonYear": 2019,
+            "episodes": 26,
+            "coverImage": {"large": ""},
+        }
+
+    anilist.get_anime_by_id = get_anime_by_id
+    app_state = MagicMock()
+    app_state.anilist_client = anilist
+
+    processor = ArrPostProcessor(
+        db=db, config=_config_with_anilist(), app_state=app_state
+    )
+    await processor._ensure_metadata_cached(123)
+
+    assert saved["year"] == 2019
+    # Existing provider IDs must be preserved, not wiped
+    assert saved["tvdb_id"] == "145"
+
+
+@pytest.mark.asyncio
+async def test_ensure_metadata_cached_noop_when_year_present() -> None:
+    """No AniList fetch when a year is already cached."""
+    db = MagicMock()
+
+    async def get_cached_metadata(anilist_id: int):
+        return {"year": 2019}
+
+    db.get_cached_metadata = get_cached_metadata
+    anilist = MagicMock()
+    anilist.get_anime_by_id = AsyncMock()
+    app_state = MagicMock()
+    app_state.anilist_client = anilist
+
+    processor = ArrPostProcessor(
+        db=db, config=_config_with_anilist(), app_state=app_state
+    )
+    await processor._ensure_metadata_cached(123)
+    anilist.get_anime_by_id.assert_not_awaited()
