@@ -1205,9 +1205,7 @@ class ArrPostProcessor:
             media = await anilist_client.get_anime_by_id(anilist_id)
             if not media:
                 return
-            year = media.get("seasonYear") or (media.get("startDate") or {}).get(
-                "year"
-            )
+            year = media.get("seasonYear") or (media.get("startDate") or {}).get("year")
             if not year:
                 return
             import json as _json
@@ -1216,9 +1214,7 @@ class ArrPostProcessor:
             await self._db.set_cached_metadata(
                 anilist_id=anilist_id,
                 title_romaji=title.get("romaji") or cached.get("title_romaji") or "",
-                title_english=title.get("english")
-                or cached.get("title_english")
-                or "",
+                title_english=title.get("english") or cached.get("title_english") or "",
                 title_native=title.get("native") or cached.get("title_native") or "",
                 synonyms=[s for s in (media.get("synonyms") or []) if s],
                 episodes=media.get("episodes"),

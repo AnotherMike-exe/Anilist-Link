@@ -1620,8 +1620,10 @@ class LibraryRestructurer:
             # keep it cheap, but forced for the single-item Smart Move.
             _force = getattr(self, "_force_franchise_root", False)
             _is_movie = (si.anilist_format or "").upper() == "MOVIE"
-            if (not _root_id or _root_id == si.anilist_id) and si.anilist_id and (
-                _force or _is_movie
+            if (
+                (not _root_id or _root_id == si.anilist_id)
+                and si.anilist_id
+                and (_force or _is_movie)
             ):
                 try:
                     from src.Utils.NamingTranslator import resolve_franchise_root_id
@@ -1636,9 +1638,7 @@ class LibraryRestructurer:
                             pass
                         _root_id = _walked
                 except Exception as _exc:
-                    logger.debug(
-                        "Prequel-root walk failed for %s: %s", si.title, _exc
-                    )
+                    logger.debug("Prequel-root walk failed for %s: %s", si.title, _exc)
 
             _root_folder = ""
             if _root_id and _root_id != si.anilist_id:
