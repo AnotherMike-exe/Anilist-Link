@@ -222,8 +222,10 @@ async def smart_move_execute(request: Request) -> JSONResponse:
     # the UI reflects the move without a full re-index.
     new_folder = group.target_folder
     try:
-        if library_id and new_folder and new_folder.rstrip("/") != old_folder.rstrip(
-            "/"
+        if (
+            library_id
+            and new_folder
+            and new_folder.rstrip("/") != old_folder.rstrip("/")
         ):
             await db.execute(
                 "UPDATE library_items"
