@@ -182,6 +182,7 @@ async def arr_add(request: Request) -> JSONResponse:
         anilist_client=anilist_client,
         sonarr_client=sonarr_client,
         radarr_client=radarr_client,
+        config=config,
     )
 
     media: dict[str, Any] = {

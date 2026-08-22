@@ -580,9 +580,7 @@ async def test_resolve_unmapped_season_self_heals() -> None:
         return [100, 200]  # S1=100, S2=200
 
     with (
-        patch(
-            "src.Clients.AnilistClient.AniListClient", return_value=fake_client
-        ),
+        patch("src.Clients.AnilistClient.AniListClient", return_value=fake_client),
         patch(
             "src.Utils.NamingTranslator.collect_series_chain", side_effect=fake_chain
         ),
@@ -911,3 +909,199 @@ async def test_entry_subfolder_tv_uses_season_folder() -> None:
     season_info = _title_info(title="Mugen Train Arc", year=2021)
     sub = await processor._get_entry_subfolder(77, 2, show_info, season_info)
     assert sub == "Season 2"
+
+
+# ---------------------------------------------------------------------------
+# Tests — sync_sonarr_series_path
+# ---------------------------------------------------------------------------
+
+
+def _make_path_sync_db(
+    library_path: str,
+    *,
+    related: list[int] | None = None,
+    titles: dict[int, dict[str, Any]] | None = None,
+    group_root: int | None = None,
+) -> MagicMock:
+    """Mock DB for path-sync tests.
+
+    ``related`` are extra AniList IDs mapped to the same Sonarr series;
+    ``titles`` maps AniList ID → cached metadata; ``group_root`` makes every
+    entry resolve its show folder from that root entry's title.
+    """
+    db = _make_db(library_path=library_path)
+
+    async def fetch_all(query: str, params: tuple = ()) -> list[dict[str, Any]]:
+        if "season_mapping" in query or "anilist_sonarr_mapping" in query:
+            return [{"anilist_id": aid} for aid in (related or [])]
+        return []
+
+    db.fetch_all = fetch_all
+
+    if titles:
+
+        async def get_cached_metadata(anilist_id: int) -> dict[str, Any] | None:
+            return titles.get(anilist_id)
+
+        db.get_cached_metadata = get_cached_metadata
+
+    if group_root is not None:
+
+        async def get_series_group_by_anilist_id(anilist_id: int) -> dict[str, Any]:
+            return {"root_anilist_id": group_root}
+
+        db.get_series_group_by_anilist_id = get_series_group_by_anilist_id
+
+    return db
+
+
+def _make_path_sync_client(current_path: str) -> MagicMock:
+    """Mock SonarrClient recording update_series_path / rescan_series calls."""
+    client = MagicMock()
+    client.updated_to = []
+    client.rescanned = []
+
+    async def get_series_by_id(series_id: int) -> dict[str, Any]:
+        return {"id": series_id, "title": "Re:ZERO", "path": current_path}
+
+    async def update_series_path(series_id: int, new_path: str) -> dict[str, Any]:
+        client.updated_to.append((series_id, new_path))
+        return {}
+
+    async def rescan_series(series_id: int) -> dict[str, Any]:
+        client.rescanned.append(series_id)
+        return {}
+
+    async def close() -> None:
+        pass
+
+    client.get_series_by_id = get_series_by_id
+    client.update_series_path = update_series_path
+    client.rescan_series = rescan_series
+    client.close = close
+    return client
+
+
+@pytest.mark.asyncio
+async def test_path_sync_repoints_series_at_restructured_folder(tmp_path) -> None:
+    """The core fix: an existing series is repointed at the moved files."""
+    library = tmp_path / "anime"
+    (library / "ReZero kara Hajimeru Isekai Seikatsu").mkdir(parents=True)
+
+    db = _make_path_sync_db(str(library))
+    processor = ArrPostProcessor(db=db, config=_make_config("", ""))
+    client = _make_path_sync_client("/media/tv/Re Zero")
+
+    result = await processor.sync_sonarr_series_path(42, 21234, sonarr=client)
+
+    assert result["action"] == "updated"
+    expected = str(library / "ReZero kara Hajimeru Isekai Seikatsu")
+    assert result["to"] == expected
+    assert client.updated_to == [(42, expected)]
+    assert client.rescanned == [42]  # rescan so Sonarr imports the files
+
+
+@pytest.mark.asyncio
+async def test_path_sync_leaves_sonarr_alone_when_files_not_moved(tmp_path) -> None:
+    """Safety: never repoint at a folder that doesn't exist on disk."""
+    library = tmp_path / "anime"
+    library.mkdir(parents=True)  # library exists, show folder does not
+
+    db = _make_path_sync_db(str(library))
+    processor = ArrPostProcessor(db=db, config=_make_config("", ""))
+    client = _make_path_sync_client("/media/tv/Re Zero")
+
+    result = await processor.sync_sonarr_series_path(42, 21234, sonarr=client)
+
+    assert result["action"] == "target_missing"
+    assert client.updated_to == []
+    assert client.rescanned == []
+
+
+@pytest.mark.asyncio
+async def test_path_sync_noop_when_already_correct(tmp_path) -> None:
+    """A series already at the right path is left untouched."""
+    library = tmp_path / "anime"
+    show = library / "ReZero kara Hajimeru Isekai Seikatsu"
+    show.mkdir(parents=True)
+
+    db = _make_path_sync_db(str(library))
+    processor = ArrPostProcessor(db=db, config=_make_config("", ""))
+    client = _make_path_sync_client(str(show))
+
+    result = await processor.sync_sonarr_series_path(42, 21234, sonarr=client)
+
+    assert result["action"] == "already_correct"
+    assert client.updated_to == []
+
+
+@pytest.mark.asyncio
+async def test_path_sync_translates_container_prefixes(tmp_path) -> None:
+    """The path written to Sonarr is the arr-side path, not our local one."""
+    local_root = tmp_path / "mnt" / "media"
+    (local_root / "ReZero kara Hajimeru Isekai Seikatsu").mkdir(parents=True)
+
+    db = _make_path_sync_db(str(local_root))
+    config = _make_config(
+        sonarr_path_prefix="/data", sonarr_local_prefix=str(local_root)
+    )
+    processor = ArrPostProcessor(db=db, config=config)
+    client = _make_path_sync_client("/data/tv/Re Zero")
+
+    result = await processor.sync_sonarr_series_path(42, 21234, sonarr=client)
+
+    assert result["action"] == "updated"
+    assert result["to"] == "/data/ReZero kara Hajimeru Isekai Seikatsu"
+
+
+@pytest.mark.asyncio
+async def test_path_sync_never_targets_the_library_root(tmp_path) -> None:
+    """A blank title must not resolve the show folder to the library root."""
+    library = tmp_path / "anime"
+    library.mkdir(parents=True)
+
+    db = _make_path_sync_db(str(library), titles={21234: {}})
+    processor = ArrPostProcessor(db=db, config=_make_config("", ""))
+    client = _make_path_sync_client("/media/tv/Re Zero")
+
+    result = await processor.sync_sonarr_series_path(42, 21234, sonarr=client)
+
+    assert result["action"] == "no_title"
+    assert client.updated_to == []
+
+
+@pytest.mark.asyncio
+async def test_path_sync_finds_folder_named_after_series_group_root(tmp_path) -> None:
+    """Linking a sequel finds the folder named after the season 1 entry."""
+    library = tmp_path / "anime"
+    (library / "Attack on Titan").mkdir(parents=True)
+
+    # Adding S4 (id 999); the library folder is named after the S1 root (id 100).
+    db = _make_path_sync_db(
+        str(library),
+        related=[100],
+        titles={
+            999: {"title_romaji": "Shingeki no Kyojin: The Final Season"},
+            100: {"title_romaji": "Attack on Titan"},
+        },
+    )
+    processor = ArrPostProcessor(db=db, config=_make_config("", ""))
+    client = _make_path_sync_client("/media/tv/Shingeki")
+
+    result = await processor.sync_sonarr_series_path(42, 999, sonarr=client)
+
+    assert result["action"] == "updated"
+    assert result["to"] == str(library / "Attack on Titan")
+
+
+@pytest.mark.asyncio
+async def test_path_sync_skipped_without_library_path(tmp_path) -> None:
+    """No configured library means nothing to reconcile against."""
+    db = _make_path_sync_db("")
+    processor = ArrPostProcessor(db=db, config=_make_config("", ""))
+    client = _make_path_sync_client("/media/tv/Re Zero")
+
+    result = await processor.sync_sonarr_series_path(42, 21234, sonarr=client)
+
+    assert result["action"] == "no_library_path"
+    assert client.updated_to == []

@@ -347,6 +347,225 @@ class ArrPostProcessor:
             return arr_prefix + path[len(local_prefix) :]
         return path
 
+    # ------------------------------------------------------------------
+    # Path reconciliation
+    # ------------------------------------------------------------------
+
+    async def _candidate_folder_names(self, anilist_ids: list[int]) -> list[str]:
+        """Render show folder names for *anilist_ids*, de-duplicated, order kept.
+
+        Blank names are dropped — an empty folder name would resolve to the
+        library root itself, which must never be treated as a show folder.
+        """
+        names: list[str] = []
+        for aid in anilist_ids:
+            try:
+                show_info, _ = await self._get_show_and_season_info(aid)
+            except Exception:
+                continue
+            if not show_info.get("title"):
+                continue
+            folder = (await self._get_folder_name(show_info) or "").strip(" /.")
+            if folder and folder not in names:
+                names.append(folder)
+        return names
+
+    async def _related_anilist_ids(self, sonarr_id: int, anilist_id: int) -> list[int]:
+        """Return *anilist_id* first, then every other entry mapped to this series.
+
+        The series group may not exist yet when a series is first linked, so the
+        entry's own title can differ from the library folder (which is named
+        after the group root).  Checking siblings covers that case.
+        """
+        ids: list[int] = [anilist_id]
+        for sql in (
+            "SELECT anilist_id FROM anilist_sonarr_season_mapping"
+            " WHERE sonarr_id=? ORDER BY season_number",
+            "SELECT anilist_id FROM anilist_sonarr_mapping WHERE sonarr_id=?",
+        ):
+            try:
+                for row in await self._db.fetch_all(sql, (sonarr_id,)):
+                    aid = int(row["anilist_id"])
+                    if aid not in ids:
+                        ids.append(aid)
+            except Exception:
+                logger.debug("Could not load related entries", exc_info=True)
+        return ids
+
+    async def sync_sonarr_series_path(
+        self,
+        sonarr_id: int,
+        anilist_id: int,
+        sonarr: SonarrClient | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Repoint a Sonarr series at its restructured library folder.
+
+        Sonarr keeps whatever path it was given when the series was added, so a
+        series whose files were later moved by the restructurer still points at
+        the old location and reports every episode as missing.  This finds the
+        show folder in our library and updates Sonarr's record to match, then
+        rescans so the existing files are picked up.
+
+        Only ever updates the stored path — files are never moved.  The update
+        is applied *only* when the expected folder actually exists on disk, so
+        a series with no files yet (or one that was never restructured) is left
+        exactly as Sonarr has it.
+        """
+        if not self._config.sonarr.url or not self._config.sonarr.api_key:
+            return {"ok": False, "action": "not_configured"}
+
+        library_path = await self._get_library_output_path(anilist_format="TV")
+        if not library_path:
+            return {"ok": True, "action": "no_library_path"}
+
+        arr_prefix = self._config.sonarr.path_prefix
+        local_prefix = self._config.sonarr.local_path_prefix
+        local_root = self._to_local(library_path, arr_prefix, local_prefix)
+
+        candidates = await self._candidate_folder_names(
+            await self._related_anilist_ids(sonarr_id, anilist_id)
+        )
+        if not candidates:
+            return {"ok": True, "action": "no_title"}
+
+        local_target: str = ""
+        for folder in candidates:
+            probe = Path(local_root) / folder
+            if probe.is_dir():
+                local_target = str(probe)
+                break
+
+        if not local_target:
+            # Files aren't at the restructured location — leave Sonarr alone
+            # rather than pointing it at a folder that doesn't exist.
+            return {"ok": True, "action": "target_missing", "checked": candidates}
+
+        arr_target = self._to_arr(local_target, arr_prefix, local_prefix)
+
+        owns_client = sonarr is None
+        client = sonarr or SonarrClient(
+            url=self._config.sonarr.url, api_key=self._config.sonarr.api_key
+        )
+        try:
+            series = await client.get_series_by_id(sonarr_id)
+            if not series:
+                return {"ok": False, "action": "not_found"}
+
+            current = str(series.get("path", ""))
+            if current.rstrip("/") == arr_target.rstrip("/"):
+                return {"ok": True, "action": "already_correct", "path": current}
+
+            if dry_run:
+                return {
+                    "ok": True,
+                    "action": "would_update",
+                    "from": current,
+                    "to": arr_target,
+                }
+
+            await client.update_series_path(sonarr_id, arr_target)
+            logger.info(
+                "Sonarr series id=%d path %s → %s (restructured location)",
+                sonarr_id,
+                current or "(none)",
+                arr_target,
+            )
+            try:
+                await client.rescan_series(sonarr_id)
+            except Exception as exc:
+                logger.warning("Rescan failed for sonarr_id=%d: %s", sonarr_id, exc)
+
+            return {
+                "ok": True,
+                "action": "updated",
+                "from": current,
+                "to": arr_target,
+            }
+        finally:
+            if owns_client:
+                await client.close()
+
+    async def sync_radarr_movie_path(
+        self,
+        radarr_id: int,
+        anilist_id: int,
+        radarr: RadarrClient | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Repoint a Radarr movie at its restructured library folder.
+
+        Radarr equivalent of :meth:`sync_sonarr_series_path` — same rules: the
+        stored path only, never a file move, and only when the expected folder
+        already exists on disk.
+        """
+        if not self._config.radarr.url or not self._config.radarr.api_key:
+            return {"ok": False, "action": "not_configured"}
+
+        library_path = await self._get_library_output_path(anilist_format="MOVIE")
+        if not library_path:
+            return {"ok": True, "action": "no_library_path"}
+
+        arr_prefix = self._config.radarr.path_prefix
+        local_prefix = self._config.radarr.local_path_prefix
+        local_root = self._to_local(library_path, arr_prefix, local_prefix)
+
+        title_info = await self._get_anilist_title_info(anilist_id)
+        if not title_info["title"]:
+            return {"ok": True, "action": "no_title"}
+        folder = (await self._get_folder_name(title_info) or "").strip(" /.")
+        if not folder:
+            return {"ok": True, "action": "no_title"}
+
+        local_target_path = Path(local_root) / folder
+        if not local_target_path.is_dir():
+            return {"ok": True, "action": "target_missing", "checked": [folder]}
+
+        arr_target = self._to_arr(str(local_target_path), arr_prefix, local_prefix)
+
+        owns_client = radarr is None
+        client = radarr or RadarrClient(
+            url=self._config.radarr.url, api_key=self._config.radarr.api_key
+        )
+        try:
+            movie = await client.get_movie_by_id(radarr_id)
+            if not movie:
+                return {"ok": False, "action": "not_found"}
+
+            current = str(movie.get("path", ""))
+            if current.rstrip("/") == arr_target.rstrip("/"):
+                return {"ok": True, "action": "already_correct", "path": current}
+
+            if dry_run:
+                return {
+                    "ok": True,
+                    "action": "would_update",
+                    "from": current,
+                    "to": arr_target,
+                }
+
+            await client.update_movie_path(radarr_id, arr_target)
+            logger.info(
+                "Radarr movie id=%d path %s → %s (restructured location)",
+                radarr_id,
+                current or "(none)",
+                arr_target,
+            )
+            try:
+                await client.rescan_movie(radarr_id)
+            except Exception as exc:
+                logger.warning("Rescan failed for radarr_id=%d: %s", radarr_id, exc)
+
+            return {
+                "ok": True,
+                "action": "updated",
+                "from": current,
+                "to": arr_target,
+            }
+        finally:
+            if owns_client:
+                await client.close()
+
     async def reprocess_sonarr_series(
         self, sonarr_id: int, dry_run: bool = False
     ) -> dict[str, Any]:
