@@ -10,7 +10,9 @@ from fastapi.responses import JSONResponse
 
 from src.Clients.RadarrClient import RadarrClient
 from src.Clients.SonarrClient import SonarrClient
+from src.Download.ArrLinkVerifier import ArrLinkVerifier
 from src.Download.MappingResolver import MappingResolver
+from src.Web.App import spawn_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +223,105 @@ async def arr_add(request: Request) -> JSONResponse:
             await sonarr_client.close()
         if radarr_client:
             await radarr_client.close()
+
+
+# ------------------------------------------------------------------
+# Link verification
+# ------------------------------------------------------------------
+
+
+@router.post("/api/arr/verify-link")
+async def arr_verify_link(request: Request) -> JSONResponse:
+    """Re-check one entry's Sonarr/Radarr link and correct what has drifted.
+
+    Adding an entry fixes its *arr path at that moment, but nothing re-checks
+    it afterwards — so an entry linked before its files were restructured stays
+    pointed at the old location with no way to correct it.  This is that way.
+
+    Clears the link when the series/movie has been deleted in *arr, otherwise
+    repoints it at the restructured folder.  Never moves files.
+
+    Body JSON: { anilist_id }
+    """
+    db = request.app.state.db
+    config = request.app.state.config
+
+    body: dict[str, Any] = {}
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    anilist_id = int(body.get("anilist_id", 0))
+    if not anilist_id:
+        return JSONResponse({"error": "anilist_id required"}, status_code=400)
+
+    verifier = ArrLinkVerifier(db=db, config=config, app_state=request.app.state)
+    try:
+        result = await verifier.verify_entry(anilist_id)
+    except Exception as exc:
+        logger.exception("verify-link failed for anilist_id=%d", anilist_id)
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+    return JSONResponse(
+        {
+            "ok": not result.error,
+            "anilist_id": result.anilist_id,
+            "service": result.service,
+            "linked": result.linked,
+            "removed": result.removed,
+            "changed": result.changed,
+            "path_action": result.path_action,
+            "path_from": result.path_from,
+            "path_to": result.path_to,
+            "message": result.summary(),
+            "error": result.error,
+        }
+    )
+
+
+@router.post("/api/arr/verify-all")
+async def arr_verify_all(request: Request) -> JSONResponse:
+    """Verify every stored Sonarr/Radarr link in the background.
+
+    Runs the same check as ``/api/arr/verify-link`` over every mapping, so
+    entries deleted in *arr stop showing as tracked and stale paths are
+    repointed in bulk.  Posts a notification with the summary when done.
+    """
+    db = request.app.state.db
+    config = request.app.state.config
+
+    if not (config.sonarr.url and config.sonarr.api_key) and not (
+        config.radarr.url and config.radarr.api_key
+    ):
+        return JSONResponse(
+            {"ok": False, "error": "Neither Sonarr nor Radarr is configured"},
+            status_code=503,
+        )
+
+    verifier = ArrLinkVerifier(db=db, config=config, app_state=request.app.state)
+
+    async def _run() -> None:
+        try:
+            summary = await verifier.verify_all()
+            await db.add_notification(
+                notification_type="arr_verify",
+                message=(
+                    f"Verified {summary['checked']} Sonarr/Radarr link"
+                    f"{'s' if summary['checked'] != 1 else ''} — "
+                    f"{summary['removed']} no longer in *arr, "
+                    f"{summary['repointed']} path"
+                    f"{'s' if summary['repointed'] != 1 else ''} corrected"
+                    + (f", {summary['errors']} errors" if summary["errors"] else "")
+                ),
+                action_url="/watchlist",
+                action_label="View watchlist",
+            )
+        except Exception:
+            logger.exception("verify-all failed")
+
+    spawn_background_task(request.app.state, _run(), task_key="arr_verify_all")
+    return JSONResponse({"ok": True, "message": "Verification started in background"})
 
 
 # ------------------------------------------------------------------

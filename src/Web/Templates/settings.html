@@ -35,6 +35,21 @@
         {% elif group_name == "Downloads" %}
         <p class="text-muted hint">Controls the background sync that adds your AniList watchlist to Sonarr/Radarr on a schedule. Pick which <strong>list statuses</strong> should be auto-added — leave every box unchecked to turn the sync off and add titles manually instead. Entries already linked to Sonarr/Radarr are skipped, and entries whose TVDB/TMDB ID can't be resolved are retried the next day rather than every run.</p>
         <p class="text-muted hint"><strong>Monitor mode</strong> is the default applied to newly added series, and <strong>search immediately</strong> decides whether the service goes looking for releases at the moment a title is added or waits for its own scheduled search — both match the options in the Download Manager's add dialog.</p>
+        {% if group_name == "Downloads" %}
+        <div style="margin-bottom:0.75rem">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="verifyAllArrLinks()">
+            Verify all Sonarr/Radarr links
+          </button>
+          <span id="arr-verify-status" style="margin-left:0.75rem;font-size:0.85rem;color:var(--text-muted)"></span>
+          <p class="text-muted" style="font-size:0.8rem;margin:0.4rem 0 0;max-width:70ch">
+            Re-checks every entry linked to Sonarr/Radarr. Entries deleted in *arr stop
+            showing as tracked so they can be added again, and entries whose files were
+            moved by a restructure have their stored path corrected. Reads and repoints
+            only — it never moves or deletes files. Runs in the background; you'll get a
+            notification with the summary.
+          </p>
+        </div>
+        {% endif %}
         {% elif group_name == "Naming Templates & Restructuring" %}
         <p class="text-muted hint">Customize how files and folders are named during restructuring. Use tokens like <code>{title}</code>, <code>{year}</code>, <code>{season}</code>, <code>{episode}</code>, <code>{quality}</code>.</p>
         <div class="naming-presets" style="margin-bottom:1rem">
@@ -462,6 +477,29 @@ document:
     // Initial render
     updatePreview();
 })();
+
+async function verifyAllArrLinks() {
+    var btn = event.target;
+    var status = document.getElementById('arr-verify-status');
+    btn.disabled = true;
+    status.textContent = 'Starting\u2026';
+    status.style.color = 'var(--text-muted)';
+    try {
+        var resp = await fetch('/api/arr/verify-all', {method: 'POST'});
+        var data = await resp.json();
+        if (data.ok) {
+            status.textContent = 'Running in the background \u2014 a notification will report the result.';
+        } else {
+            status.textContent = 'Error: ' + (data.error || 'unknown');
+            status.style.color = '#c62828';
+        }
+    } catch(e) {
+        status.textContent = 'Error: ' + e.message;
+        status.style.color = '#c62828';
+    } finally {
+        btn.disabled = false;
+    }
+}
 
 async function migrateRootFolder(service) {
     var btn = event.target;

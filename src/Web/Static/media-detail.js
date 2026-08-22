@@ -275,6 +275,14 @@
                         'onclick="reprocessEntry(\'radarr\',' + entry.radarr_id +
                         ',this,true)">Preview Move</button>';
                 }
+                if (typeof verifyArrLink === 'function' && entry.anilist_id) {
+                    actHtml += '<button class="btn btn-secondary btn-xs" ' +
+                        'title="Re-check against Sonarr/Radarr: clears the link if ' +
+                        'it was deleted there, and corrects the stored path if the ' +
+                        'files have since been restructured. Never moves files." ' +
+                        'onclick="verifyArrLink(' + entry.anilist_id +
+                        ',this)">Verify Link</button>';
+                }
             }
             actionsWrap.innerHTML = actHtml
                 ? '<div style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.9rem">' +

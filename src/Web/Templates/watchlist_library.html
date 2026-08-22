@@ -283,6 +283,9 @@
                   onclick="reprocessEntry('radarr', {{ entry.radarr_id }}, this, true)"
                   title="Preview what file would be moved and where">Preview Move</button>
           {% endif %}
+          <button class="btn btn-secondary btn-xs"
+                  onclick="verifyArrLink({{ aid }}, this)"
+                  title="Re-check this entry against Sonarr/Radarr: clears the link if it was deleted there, and corrects the stored path if the files have since been restructured. Never moves files.">Verify Link</button>
           {% elif arr_enabled %}
           <button class="btn btn-secondary btn-xs"
                   onclick="previewAdd({{ aid }}, '{{ entry.anilist_title|e }}', this)"
@@ -1431,12 +1434,40 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       if (data.ok) {
         closeWatchlistDetail();
         showToast('Unlinked "' + title + '" from Sonarr — you can now re-add it.');
-        setTimeout(function() { loadWatchlist(); }, 600);
+        setTimeout(function() { window.location.reload(); }, 900);
       } else {
         alert('Unlink failed: ' + (data.error || 'unknown error'));
       }
     } catch(e) {
       alert('Unlink failed: ' + e);
+    }
+  };
+
+  // Re-check an entry against *arr: clears a link deleted there, and corrects
+  // a path left stale by a restructure. Never touches files.
+  window.verifyArrLink = async function(anilistId, btn) {
+    btn.disabled = true;
+    var orig = btn.textContent;
+    btn.textContent = '\u2026';
+    try {
+      var resp = await fetch('/api/arr/verify-link', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({anilist_id: anilistId})
+      });
+      var data = await resp.json();
+      var msg = data.message || data.error || 'unknown result';
+      showToast(msg, data.ok === false ? 'error' : 'success');
+      // A cleared link or a new path changes what the row should offer.
+      if (data.changed) {
+        if (typeof closeMediaDetail === 'function') closeMediaDetail();
+        setTimeout(function() { window.location.reload(); }, 1200);
+      }
+    } catch(e) {
+      showToast('Verify failed: ' + e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
     }
   };
 
