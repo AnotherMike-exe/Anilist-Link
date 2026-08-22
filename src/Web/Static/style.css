@@ -409,6 +409,14 @@ input:disabled {
     margin-bottom: 1rem;
 }
 
+/* Explanatory text under an individual form field. */
+.field-hint {
+    font-size: 0.78rem;
+    line-height: 1.45;
+    color: var(--text-muted);
+    margin: 0;
+}
+
 code {
     background: var(--bg);
     padding: 0.15rem 0.4rem;
