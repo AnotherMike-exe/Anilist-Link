@@ -91,6 +91,7 @@ class DownloadSyncer:
             anilist_client=self._anilist,
             sonarr_client=sonarr_client,
             radarr_client=radarr_client,
+            config=self._config,
         )
 
         # Determine root folders and quality profiles

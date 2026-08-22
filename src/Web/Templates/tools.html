@@ -89,7 +89,12 @@
     </div>
     <div class="tool-card-body">
       <h2>Sonarr / Radarr</h2>
-      <p>Send add requests to Sonarr/Radarr using AniList alternative titles for better matching.</p>
+      <p>Sends add requests to Sonarr (series) and Radarr (movies) straight from your AniList
+         watchlist. AniList synonyms are pushed as alternate titles so indexers match anime
+         releases that don't use the TVDB name.</p>
+      <p style="margin-top:0.4rem">After a download completes, the webhook receiver renames and
+         files episodes into your library's AniList naming structure, then points Sonarr/Radarr
+         at the new location so nothing shows as missing.</p>
       {% if downloads_configured %}
       {% if download_count > 0 %}
       <p class="tool-card-meta">{{ download_count }} request{{ 's' if download_count != 1 else '' }} made</p>

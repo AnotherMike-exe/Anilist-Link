@@ -10,8 +10,9 @@ import pytest
 from src.Scanner.LibraryRestructurer import LibraryRestructurer
 
 
-def _restructurer(db: Any, folder_template: str = "{title} ({year})",
-                  title_pref: str = "romaji") -> LibraryRestructurer:
+def _restructurer(
+    db: Any, folder_template: str = "{title} ({year})", title_pref: str = "romaji"
+) -> LibraryRestructurer:
     return LibraryRestructurer(
         db=db,
         group_builder=MagicMock(),
@@ -39,8 +40,11 @@ async def test_root_folder_uses_year_and_romaji() -> None:
     db = _db_with_group(
         "Demon Slayer",
         101,
-        {"title_romaji": "Kimetsu no Yaiba", "title_english": "Demon Slayer",
-         "year": 2019},
+        {
+            "title_romaji": "Kimetsu no Yaiba",
+            "title_english": "Demon Slayer",
+            "year": 2019,
+        },
     )
     r = _restructurer(db)
     assert await r._render_group_root_folder(5) == "Kimetsu no Yaiba (2019)"
@@ -51,8 +55,11 @@ async def test_root_folder_english_pref() -> None:
     db = _db_with_group(
         "Demon Slayer",
         101,
-        {"title_romaji": "Kimetsu no Yaiba", "title_english": "Demon Slayer",
-         "year": 2019},
+        {
+            "title_romaji": "Kimetsu no Yaiba",
+            "title_english": "Demon Slayer",
+            "year": 2019,
+        },
     )
     r = _restructurer(db, title_pref="english")
     assert await r._render_group_root_folder(5) == "Demon Slayer (2019)"

@@ -27,9 +27,14 @@
         {% elif group_name == "AniList" %}
         <p class="text-muted hint">Set your AniList app's redirect URL to: <code>{{ anilist_callback_url }}</code></p>
         {% elif group_name == "Sonarr" %}
-        <p class="text-muted hint">Set <strong>Anime root folder path</strong> to your anime directory (e.g. <code>/data/anime</code>) so new series land there instead of the default TV folder. Register <code>http://&lt;your-host&gt;:9876/api/webhook/sonarr</code> in Sonarr → Settings → Connect for post-download restructuring.</p>
+        <p class="text-muted hint">Sonarr handles everything AniList doesn't classify as a movie — TV, ONA, OVA and specials. Set <strong>Anime root folder path</strong> to your anime directory (e.g. <code>/data/anime</code>) so new series land there instead of the default TV folder. Register <code>http://&lt;your-host&gt;:9876/api/webhook/sonarr</code> in Sonarr → Settings → Connect for post-download restructuring.</p>
+        <p class="text-muted hint">The two <strong>path</strong> fields only matter when Sonarr and Anilist-Link see the same files at different paths — typically separate containers with different volume mounts. Enter the same directory as each one sees it (e.g. <code>/tv</code> in Sonarr, <code>/data/anime</code> here) so downloaded files can be found and moved. Leave both blank if the paths already match.</p>
         {% elif group_name == "Radarr" %}
-        <p class="text-muted hint">Set <strong>Anime root folder path</strong> to your anime movies directory. Register <code>http://&lt;your-host&gt;:9876/api/webhook/radarr</code> in Radarr → Settings → Connect for post-download restructuring.</p>
+        <p class="text-muted hint">Radarr handles AniList entries with the MOVIE format. Set <strong>Anime root folder path</strong> to your anime movies directory. Register <code>http://&lt;your-host&gt;:9876/api/webhook/radarr</code> in Radarr → Settings → Connect for post-download restructuring.</p>
+        <p class="text-muted hint">The two <strong>path</strong> fields only matter when Radarr and Anilist-Link see the same files at different paths — typically separate containers with different volume mounts. Enter the same directory as each one sees it, or leave both blank if the paths already match.</p>
+        {% elif group_name == "Downloads" %}
+        <p class="text-muted hint">Controls the background sync that adds your AniList watchlist to Sonarr/Radarr on a schedule. Pick which <strong>list statuses</strong> should be auto-added — leave every box unchecked to turn the sync off and add titles manually instead. Entries already linked to Sonarr/Radarr are skipped, and entries whose TVDB/TMDB ID can't be resolved are retried the next day rather than every run.</p>
+        <p class="text-muted hint"><strong>Monitor mode</strong> is the default applied to newly added series, and <strong>search immediately</strong> decides whether the service goes looking for releases at the moment a title is added or waits for its own scheduled search — both match the options in the Download Manager's add dialog.</p>
         {% elif group_name == "Naming Templates & Restructuring" %}
         <p class="text-muted hint">Customize how files and folders are named during restructuring. Use tokens like <code>{title}</code>, <code>{year}</code>, <code>{season}</code>, <code>{episode}</code>, <code>{quality}</code>.</p>
         <div class="naming-presets" style="margin-bottom:1rem">
@@ -54,6 +59,12 @@
             Move all tracked entries to anime folder
           </button>
           <span id="{{ group_name | lower }}-migrate-status" style="margin-left:0.75rem;font-size:0.85rem;color:var(--text-muted)"></span>
+          <p class="text-muted" style="font-size:0.8rem;margin:0.4rem 0 0;max-width:70ch">
+            Repoints every {{ group_name }} entry linked to AniList at the anime root folder above, and
+            asks {{ group_name }} to move the files on disk to match. Only affects entries this app has
+            mapped. Use it when the entries are still sitting in their original folders — if the files
+            have already been moved elsewhere, {{ group_name }} won't find them at the old path.
+          </p>
         </div>
         {% endif %}
         {% if group_name == "AniList" %}
