@@ -51,6 +51,7 @@ class MappingResolver:
         sonarr_client: SonarrClient | None = None,
         radarr_client: RadarrClient | None = None,
         config: AppConfig | None = None,
+        app_state: object | None = None,
     ) -> None:
         self._db = db
         self._anilist = anilist_client
@@ -58,6 +59,9 @@ class MappingResolver:
         self._radarr = radarr_client
         # Optional — without it the *arr path reconciliation below is skipped.
         self._config = config
+        # Optional — lets the path sync walk the franchise chain when resolving
+        # where a movie is nested; without it the walk degrades to a flat folder.
+        self._app_state = app_state
 
     async def _sync_arr_path(
         self, service: str, arr_id: int | None, anilist_id: int
@@ -77,7 +81,9 @@ class MappingResolver:
         try:
             from src.Download.ArrPostProcessor import ArrPostProcessor
 
-            processor = ArrPostProcessor(db=self._db, config=self._config)
+            processor = ArrPostProcessor(
+                db=self._db, config=self._config, app_state=self._app_state
+            )
             if service == "sonarr":
                 result = await processor.sync_sonarr_series_path(
                     arr_id, anilist_id, sonarr=self._sonarr

@@ -1105,3 +1105,55 @@ async def test_path_sync_skipped_without_library_path(tmp_path) -> None:
 
     assert result["action"] == "no_library_path"
     assert client.updated_to == []
+
+
+@pytest.mark.asyncio
+async def test_radarr_path_sync_finds_franchise_nested_movie(tmp_path) -> None:
+    """A movie nested under its franchise root is found at the nested path.
+
+    Mirrors the layout the post-processor files movies into — a flat lookup
+    would miss it and leave Radarr on its stale path.
+    """
+    library = tmp_path / "anime"
+    (library / "Demon Slayer" / "Mugen Train (2020)").mkdir(parents=True)
+
+    db = _make_db(library_path=str(library))
+
+    async def get_cached_metadata(anilist_id: int) -> dict[str, Any]:
+        if anilist_id == 500:
+            return {"title_romaji": "Demon Slayer", "year": 2019}
+        return {"title_romaji": "Mugen Train", "year": 2020}
+
+    async def get_series_group_by_anilist_id(anilist_id: int) -> dict[str, Any]:
+        return {"root_anilist_id": 500}
+
+    db.get_cached_metadata = get_cached_metadata
+    db.get_series_group_by_anilist_id = get_series_group_by_anilist_id
+
+    config = AppConfig(
+        radarr=RadarrConfig(url="http://radarr:7878", api_key="k"),
+    )
+    processor = ArrPostProcessor(db=db, config=config)
+
+    client = MagicMock()
+    client.updated_to = []
+
+    async def get_movie_by_id(movie_id: int) -> dict[str, Any]:
+        return {"id": movie_id, "path": "/old/movies/Mugen Train"}
+
+    async def update_movie_path(movie_id: int, new_path: str) -> dict[str, Any]:
+        client.updated_to.append((movie_id, new_path))
+        return {}
+
+    async def rescan_movie(movie_id: int) -> dict[str, Any]:
+        return {}
+
+    client.get_movie_by_id = get_movie_by_id
+    client.update_movie_path = update_movie_path
+    client.rescan_movie = rescan_movie
+
+    result = await processor.sync_radarr_movie_path(9, 501, radarr=client)
+
+    assert result["action"] == "updated"
+    assert result["to"] == str(library / "Demon Slayer" / "Mugen Train (2020)")
+    assert client.updated_to == [(9, result["to"])]

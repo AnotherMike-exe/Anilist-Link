@@ -513,7 +513,11 @@ class ArrPostProcessor:
         title_info = await self._get_anilist_title_info(anilist_id)
         if not title_info["title"]:
             return {"ok": True, "action": "no_title"}
-        folder = (await self._get_folder_name(title_info) or "").strip(" /.")
+
+        # Use the same layout the post-processor files movies into, so a movie
+        # nested under its franchise root is found there and not just flat.
+        relative_dir = await self._get_movie_relative_dir(anilist_id)
+        folder = str(relative_dir).strip(" /.")
         if not folder:
             return {"ok": True, "action": "no_title"}
 

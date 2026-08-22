@@ -359,6 +359,7 @@ async def _auto_link_sonarr_siblings(
     sonarr_url: str,
     sonarr_api_key: str,
     config: Any = None,
+    app_state: Any = None,
 ) -> None:
     """Background: BFS-traverse the full SEQUEL/PREQUEL chain and auto-link siblings.
 
@@ -591,7 +592,7 @@ async def _auto_link_sonarr_siblings(
             try:
                 from src.Download.ArrPostProcessor import ArrPostProcessor
 
-                processor = ArrPostProcessor(db=db, config=config)
+                processor = ArrPostProcessor(db=db, config=config, app_state=app_state)
                 result = await processor.sync_sonarr_series_path(
                     sonarr_id, root_anilist_id
                 )
@@ -683,6 +684,7 @@ async def add_to_arr(request: Request) -> JSONResponse:
         sonarr_client=sonarr_client,
         radarr_client=radarr_client,
         config=config,
+        app_state=request.app.state,
     )
 
     media: dict[str, Any] = {"title": {"romaji": anilist_title}, "synonyms": []}
@@ -719,6 +721,7 @@ async def add_to_arr(request: Request) -> JSONResponse:
                     sonarr_url=config.sonarr.url,
                     sonarr_api_key=config.sonarr.api_key,
                     config=config,
+                    app_state=request.app.state,
                 ),
             )
 
