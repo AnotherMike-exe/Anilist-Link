@@ -11,6 +11,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.responses import Response
 
+from src.Web.Routes.Helpers import apply_arr_state, load_arr_state
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["unified-library"])
@@ -325,6 +327,17 @@ async def unified_library(
                 item["list_status"] = wl_map[aid]["list_status"]
                 item["progress"] = wl_map[aid]["progress"]
 
+    # Sonarr/Radarr state, from the same helper the watchlist uses so both
+    # pages report tracking identically.
+    sonarr_info, radarr_info = await load_arr_state(db)
+    for item in items:
+        apply_arr_state(item, item.get("anilist_id"), sonarr_info, radarr_info)
+
+    cfg = request.app.state.config
+    arr_enabled = bool(cfg.sonarr.url and cfg.sonarr.api_key) or bool(
+        cfg.radarr.url and cfg.radarr.api_key
+    )
+
     matched_count = sum(1 for i in items if i.get("anilist_id"))
     title_display = await db.get_setting("app.title_display") or "romaji"
 
@@ -339,6 +352,7 @@ async def unified_library(
             "plex_configured": plex_configured,
             "jellyfin_configured": jellyfin_configured,
             "title_display": title_display,
+            "arr_enabled": arr_enabled,
             "message": request.query_params.get("message") or "",
             "error": request.query_params.get("error") or "",
             "version": "0.1.0",

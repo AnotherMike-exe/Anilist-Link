@@ -629,6 +629,16 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
   var colFilters = null;
 
   document.addEventListener('DOMContentLoaded', function() {
+    // ?q= prefills the search — the library page's "+ Add" links here, and
+    // landing on an unfiltered list would make the link useless.
+    try {
+      var q = new URLSearchParams(window.location.search).get('q');
+      if (q) {
+        var input = document.getElementById('searchInput');
+        if (input) { input.value = q; applyFilters(); }
+      }
+    } catch (e) { /* older browsers just get the unfiltered list */ }
+
     if (typeof TableFilters !== 'function') return;
     colFilters = new TableFilters({
       tableId: 'libraryTable',

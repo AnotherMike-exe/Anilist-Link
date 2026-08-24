@@ -120,3 +120,56 @@ async def test_missing_folder_is_a_noop(tmp_path) -> None:
 
     assert written == set()
     assert upserts == []
+
+
+# ---------------------------------------------------------------------------
+# Shared *arr state helpers (used by both the watchlist and the library)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_apply_arr_state_reports_sonarr_radarr_and_untracked() -> None:
+    """Every arr_* field is always set, whatever the entry's tracking state."""
+    from src.Web.Routes.Helpers import apply_arr_state
+
+    sonarr = {
+        1: {
+            "sonarr_id": 7,
+            "sonarr_season": 2,
+            "sonarr_monitored": True,
+            "monitor_type": "all",
+        }
+    }
+    radarr = {2: {"radarr_id": 9, "radarr_monitored": False, "monitor_type": "future"}}
+
+    tv: dict[str, Any] = {}
+    apply_arr_state(tv, 1, sonarr, radarr)
+    assert tv["arr_service"] == "sonarr"
+    assert tv["arr_status"] == "monitored"
+    assert tv["sonarr_id"] == 7 and tv["sonarr_season"] == 2
+    assert tv["radarr_id"] is None
+
+    movie: dict[str, Any] = {}
+    apply_arr_state(movie, 2, sonarr, radarr)
+    assert movie["arr_service"] == "radarr"
+    # Not monitored in Radarr — tracked, not monitored.
+    assert movie["arr_status"] == "tracked"
+    assert movie["radarr_id"] == 9 and movie["sonarr_id"] is None
+
+    none: dict[str, Any] = {}
+    apply_arr_state(none, 999, sonarr, radarr)
+    assert none["arr_status"] == "untracked"
+    assert none["arr_service"] == ""
+    # Fields still present, so templates never hit an undefined.
+    assert none["sonarr_id"] is None and none["radarr_id"] is None
+    assert none["sonarr_season"] is None and none["monitor_type"] == "future"
+
+
+@pytest.mark.asyncio
+async def test_apply_arr_state_handles_unmatched_items() -> None:
+    """A library row with no AniList match is simply untracked."""
+    from src.Web.Routes.Helpers import apply_arr_state
+
+    item: dict[str, Any] = {}
+    apply_arr_state(item, None, {1: {}}, {})
+    assert item["arr_status"] == "untracked"
