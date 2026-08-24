@@ -40,6 +40,11 @@
 <!-- Toolbar row 2: search -->
 <div class="lib-toolbar-row2">
     <input type="text" id="searchInput" class="search-input" placeholder="Search titles&hellip;" oninput="applyFilters()">
+    <span class="text-muted" style="font-size:0.8rem;margin-left:0.5rem">
+        Use the &#9662; on any column header to sort or filter it.
+    </span>
+    <button type="button" class="btn btn-secondary btn-xs" onclick="clearLibraryFilters()"
+            title="Reset search and all column filters">Clear filters</button>
 </div>
 
 <!-- Grid view -->
@@ -86,16 +91,16 @@
 
 <!-- List view -->
 <div class="table-scroll-container hidden" id="listView">
-    <table class="library-table">
+    <table class="library-table" id="libraryListTable">
         <thead>
             <tr>
                 <th></th>
                 <th class="sortable-th" data-col="title" onclick="sortLibrary('title')">Title <span class="sort-indicator">&#x2195;</span></th>
                 <th class="sortable-th" data-col="year" onclick="sortLibrary('year')">Year <span class="sort-indicator">&#x2195;</span></th>
-                <th>Episodes</th>
-                <th>Status</th>
-                <th>Source</th>
-                <th>AniList Match</th>
+                <th class="sortable-th" data-col="episodes" onclick="sortLibrary('episodes')">Episodes <span class="sort-indicator">&#x2195;</span></th>
+                <th class="sortable-th" data-col="status" onclick="sortLibrary('status')">Status <span class="sort-indicator">&#x2195;</span></th>
+                <th class="sortable-th" data-col="source" onclick="sortLibrary('source')">Source <span class="sort-indicator">&#x2195;</span></th>
+                <th class="sortable-th" data-col="matched" onclick="sortLibrary('matched')">AniList Match <span class="sort-indicator">&#x2195;</span></th>
                 <th class="sortable-th" data-col="confidence" onclick="sortLibrary('confidence')">Confidence <span class="sort-indicator">&#x2195;</span></th>
                 <th>Actions</th>
             </tr>
@@ -111,6 +116,16 @@
                 data-sort-title="{{ (item.title_romaji or item.title or '') | lower }}"
                 data-sort-year="{{ item.year or 0 }}"
                 data-sort-confidence="{{ item.match_confidence or 0 }}"
+                data-sort-episodes="{{ item.episodes or 0 }}"
+                data-sort-status="{{ item.anilist_status or '' }}"
+                data-sort-source="{{ item.source }}"
+                data-sort-matched="{{ 'yes' if item.anilist_id else 'no' }}"
+                data-filter-title="{{ primary_title|e }}"
+                data-filter-year="{{ item.year or '' }}"
+                data-filter-episodes="{{ item.episodes or '' }}"
+                data-filter-status="{{ item.anilist_status or '' }}"
+                data-filter-source="{{ item.source }}"
+                data-filter-matched="{{ 'Matched' if item.anilist_id else 'Unmatched' }}"
                 style="cursor:pointer"
                 onclick="openEntryDetail({{ loop.index0 }})">
                 <td style="width:48px" onclick="event.stopPropagation()">
@@ -226,6 +241,24 @@ function setView(v) {
     document.getElementById('listViewBtn').classList.toggle('active', v === 'list');
 }
 
+var libColFilters = null;
+
+document.addEventListener('DOMContentLoaded', function() {
+    if (typeof TableFilters !== 'function') return;
+    libColFilters = new TableFilters({
+        tableId: 'libraryListTable',
+        rowSelector: '#listView .library-row',
+        onChange: function() { applyFilters(); },
+        onSort: function(col, dir) { sortLibrary(col, dir); }
+    });
+});
+
+function clearLibraryFilters() {
+    document.getElementById('searchInput').value = '';
+    document.getElementById('matchFilter').value = 'all';
+    if (libColFilters) libColFilters.clear(); else applyFilters();
+}
+
 function applyFilters() {
     var q = document.getElementById('searchInput').value.toLowerCase();
     var mf = document.getElementById('matchFilter').value;
@@ -237,14 +270,17 @@ function applyFilters() {
         if (q && title.indexOf(q) === -1) return false;
         if (mf === 'matched' && matched !== 'yes') return false;
         if (mf === 'unmatched' && matched !== 'no') return false;
+        if (libColFilters && !libColFilters.passes(el)) return false;
         return true;
     }
     gridCards.forEach(function(el) { el.classList.toggle('hidden', !matches(el)); });
     listRows.forEach(function(el) { el.style.display = matches(el) ? '' : 'none'; });
 }
 
-function sortLibrary(col) {
-    if (libSortCol === col) { libSortDir = -libSortDir; } else { libSortCol = col; libSortDir = 1; }
+function sortLibrary(col, dir) {
+    if (dir) { libSortCol = col; libSortDir = dir; }
+    else if (libSortCol === col) { libSortDir = -libSortDir; }
+    else { libSortCol = col; libSortDir = 1; }
     document.querySelectorAll('#listView .sortable-th').forEach(function(th) {
         th.classList.remove('sort-asc', 'sort-desc');
         var ind = th.querySelector('.sort-indicator');
@@ -261,7 +297,7 @@ function sortLibrary(col) {
     rows.sort(function(a, b) {
         var av = a.getAttribute('data-sort-' + col) || '';
         var bv = b.getAttribute('data-sort-' + col) || '';
-        if (col === 'year' || col === 'confidence') return (parseFloat(av) - parseFloat(bv)) * libSortDir;
+        if (col === 'year' || col === 'confidence' || col === 'episodes') return (parseFloat(av) - parseFloat(bv)) * libSortDir;
         return av.localeCompare(bv) * libSortDir;
     });
     rows.forEach(function(r) { tbody.appendChild(r); });

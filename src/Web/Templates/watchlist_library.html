@@ -120,25 +120,11 @@
 <!-- Search / controls -->
 <div class="search-row">
   <input type="text" class="search-input" id="searchInput" placeholder="Search titles…" oninput="applyFilters()">
-  <label class="missing-toggle" title="Files on disk">
-    Local:
-    <select id="localFilter" onchange="applyFilters()" class="lib-select">
-      <option value="">Any</option>
-      <option value="have">Have</option>
-      <option value="arr">Via *arr</option>
-      <option value="missing">Missing</option>
-    </select>
-  </label>
-  <label class="missing-toggle" title="Tracked in Sonarr/Radarr">
-    *arr:
-    <select id="arrFilter" onchange="applyFilters()" class="lib-select">
-      <option value="">Any</option>
-      <option value="tracked">In Sonarr/Radarr</option>
-      <option value="untracked">Not in *arr</option>
-    </select>
-  </label>
+  <span class="text-muted" style="font-size:0.8rem">
+    Use the ▾ on any column header to sort or filter it.
+  </span>
   <button type="button" class="btn btn-secondary btn-xs" onclick="clearFilters()"
-          title="Reset search and filters">Clear</button>
+          title="Reset search and all column filters">Clear filters</button>
 </div>
 
 <!-- Table view -->
@@ -152,7 +138,7 @@
       <th class="sortable-th" data-col="year" onclick="sortTable('year')">Year <span class="sort-indicator">↕</span></th>
       <th class="sortable-th" data-col="eps" onclick="sortTable('eps')">Episodes <span class="sort-indicator">↕</span></th>
       <th class="sortable-th" data-col="status" onclick="sortTable('status')">Watch Status <span class="sort-indicator">↕</span></th>
-      <th>Airing</th>
+      <th class="sortable-th" data-col="airing" onclick="sortTable('airing')">Airing <span class="sort-indicator">↕</span></th>
       <th class="sortable-th" data-col="progress" onclick="sortTable('progress')">Progress <span class="sort-indicator">↕</span></th>
       <th class="sortable-th" data-col="local" onclick="sortTable('local')">Local <span class="sort-indicator">↕</span></th>
       <th class="sortable-th" data-col="arr" onclick="sortTable('arr')">*arr <span class="sort-indicator">↕</span></th>
@@ -181,6 +167,14 @@
       data-arr="{{ entry.arr_status }}"
       data-sort-local="{{ entry.local_status }}"
       data-sort-arr="{{ entry.arr_status }}{{ entry.arr_service }}"
+      data-sort-airing="{{ entry.airing_status }}"
+      data-filter-title="{{ entry.anilist_title|e }}"
+      data-filter-format="{{ entry.anilist_format }}"
+      data-filter-year="{{ entry.start_year or '' }}"
+      data-filter-status="{{ ls }}"
+      data-filter-airing="{{ entry.airing_status }}"
+      data-filter-local="{{ entry.local_status }}"
+      data-filter-arr="{{ entry.arr_status }}"
       data-title="{{ entry.anilist_title | lower }} {{ (entry.title_romaji or '') | lower }} {{ (entry.title_english or '') | lower }} {{ (entry.title_native or '') | lower }} {{ (entry.title_synonyms or '') | lower }}"
       data-sort-title="{{ entry.anilist_title | lower }}"
       data-sort-format="{{ (entry.anilist_format or '') | lower }}"
@@ -341,6 +335,13 @@
        data-status="{{ ls }}"
        data-local="{{ entry.local_status }}"
        data-arr="{{ entry.arr_status }}"
+       data-filter-title="{{ entry.anilist_title|e }}"
+       data-filter-format="{{ entry.anilist_format }}"
+       data-filter-year="{{ entry.start_year or '' }}"
+       data-filter-status="{{ ls }}"
+       data-filter-airing="{{ entry.airing_status }}"
+       data-filter-local="{{ entry.local_status }}"
+       data-filter-arr="{{ entry.arr_status }}"
        data-title="{{ entry.anilist_title | lower }} {{ (entry.title_romaji or '') | lower }} {{ (entry.title_english or '') | lower }} {{ (entry.title_native or '') | lower }} {{ (entry.title_synonyms or '') | lower }}"
        data-idx="{{ loop.index0 }}"
        onclick="openWatchlistDetail(this.dataset.idx)"
@@ -581,8 +582,11 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
   };
 
   // Sort table by column
-  window.sortTable = function(col) {
-    if (sortCol === col) {
+  window.sortTable = function(col, dir) {
+    if (dir) {
+      sortCol = col;
+      sortDir = dir;
+    } else if (sortCol === col) {
       sortDir = -sortDir;
     } else {
       sortCol = col;
@@ -622,20 +626,21 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     applyFilters();
   };
 
-  function matchesLocalArr(local, arr) {
-    var localWant = document.getElementById('localFilter').value;
-    var arrWant = document.getElementById('arrFilter').value;
-    if (localWant && local !== localWant) return false;
-    if (arrWant === 'untracked' && arr !== 'untracked') return false;
-    if (arrWant === 'tracked' && arr === 'untracked') return false;
-    return true;
-  }
+  var colFilters = null;
+
+  document.addEventListener('DOMContentLoaded', function() {
+    if (typeof TableFilters !== 'function') return;
+    colFilters = new TableFilters({
+      tableId: 'libraryTable',
+      bodyId: 'tableBody',
+      onChange: function() { applyFilters(); },
+      onSort: function(col, dir) { sortTable(col, dir); }
+    });
+  });
 
   window.clearFilters = function() {
     document.getElementById('searchInput').value = '';
-    document.getElementById('localFilter').value = '';
-    document.getElementById('arrFilter').value = '';
-    applyFilters();
+    if (colFilters) colFilters.clear(); else applyFilters();
   };
 
   window.applyFilters = function() {
@@ -645,26 +650,22 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     var visible = 0;
     rows.forEach(function(row) {
       var status = row.getAttribute('data-status') || '';
-      var local = row.getAttribute('data-local') || '';
-      var arr = row.getAttribute('data-arr') || '';
       var title = row.getAttribute('data-title') || '';
       var show = true;
       if (currentFilter !== 'ALL' && status !== currentFilter) show = false;
-      if (!matchesLocalArr(local, arr)) show = false;
       if (search && !title.includes(search)) show = false;
+      if (show && colFilters && !colFilters.passes(row)) show = false;
       row.style.display = show ? '' : 'none';
       if (show) visible++;
     });
     // Grid cards
     document.querySelectorAll('#gridView .media-card').forEach(function(card) {
       var status = card.getAttribute('data-status') || '';
-      var local = card.getAttribute('data-local') || '';
-      var arr = card.getAttribute('data-arr') || '';
       var title = card.getAttribute('data-title') || '';
       var show = true;
       if (currentFilter !== 'ALL' && status !== currentFilter) show = false;
-      if (!matchesLocalArr(local, arr)) show = false;
       if (search && !title.includes(search)) show = false;
+      if (show && colFilters && !colFilters.passes(card)) show = false;
       card.classList.toggle('hidden', !show);
     });
     var noResults = document.getElementById('noResults');
