@@ -283,6 +283,32 @@
                         'onclick="verifyArrLink(' + entry.anilist_id +
                         ',this)">Verify Link</button>';
                 }
+                if (typeof unlinkFromArr === 'function' && entry.anilist_id) {
+                    actHtml += '<button class="btn btn-secondary btn-xs" ' +
+                        'title="Remove this Sonarr/Radarr link from our database so ' +
+                        'the entry can be matched to a different series. Does not ' +
+                        'change Sonarr/Radarr." ' +
+                        'onclick="unlinkFromArr(' + entry.anilist_id + ',\'' +
+                        escJs(entry.anilist_title || '') + '\')">Unlink</button>';
+                }
+            }
+            // Not tracked yet — offer the add, same as the row does.
+            if (!isTrackedInArr(entry) && entry.anilist_id &&
+                typeof previewAdd === 'function') {
+                actHtml += '<button class="btn btn-primary btn-xs" ' +
+                    'title="Add to Sonarr/Radarr" ' +
+                    'onclick="closeMediaDetail();previewAdd(' + entry.anilist_id +
+                    ',\'' + escJs(entry.anilist_title || '') + '\',this)">+ Add</button>';
+            }
+            // Filesystem relocation is offered for any on-disk item, tracked or
+            // not — it doesn't depend on *arr.
+            if (entry.folder_path && entry.anilist_id &&
+                typeof openSmartMoveWl === 'function') {
+                actHtml += '<button class="btn btn-secondary btn-xs" ' +
+                    'title="Move this on-disk folder into its standardized library ' +
+                    'location (does not require Sonarr/Radarr)" ' +
+                    'onclick="closeMediaDetail();openSmartMoveWl(' + entry.anilist_id +
+                    ',this)">Fix Location</button>';
             }
             actionsWrap.innerHTML = actHtml
                 ? '<div style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.9rem">' +

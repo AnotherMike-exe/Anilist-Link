@@ -464,6 +464,9 @@
         setTimeout(() => toast.remove(), 4000);
     }
 
+    // Exposed on window: the button uses an inline onclick, which resolves
+    // against global scope, and everything in this file lives in an IIFE.
+    window.runSyncNow = runSyncNow;
     async function runSyncNow() {
         const btn = document.getElementById('sync-now-btn');
         const res = document.getElementById('sync-now-result');

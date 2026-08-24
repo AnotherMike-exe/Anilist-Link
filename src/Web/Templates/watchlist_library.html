@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% from "macros.html" import render_title %}
-{% block title %}Anilist-Link: My Library{% endblock %}
+{% block title %}Anilist-Link: My Watchlist{% endblock %}
 {% block container_class %}container-wide{% endblock %}
 
 {% block content %}
@@ -91,7 +91,7 @@
 <div class="toast-container" id="toastContainer"></div>
 
 <div class="library-header">
-  <h1>My Library</h1>
+  <h1>My Watchlist</h1>
   <div class="library-controls">
     <button class="btn btn-primary" id="refreshBtn" onclick="refreshWatchlist()">
       Refresh from AniList
@@ -120,10 +120,25 @@
 <!-- Search / controls -->
 <div class="search-row">
   <input type="text" class="search-input" id="searchInput" placeholder="Search titles…" oninput="applyFilters()">
-  <label class="missing-toggle">
-    <input type="checkbox" id="missingOnly" onchange="applyFilters()">
-    Missing only
+  <label class="missing-toggle" title="Files on disk">
+    Local:
+    <select id="localFilter" onchange="applyFilters()" class="lib-select">
+      <option value="">Any</option>
+      <option value="have">Have</option>
+      <option value="arr">Via *arr</option>
+      <option value="missing">Missing</option>
+    </select>
   </label>
+  <label class="missing-toggle" title="Tracked in Sonarr/Radarr">
+    *arr:
+    <select id="arrFilter" onchange="applyFilters()" class="lib-select">
+      <option value="">Any</option>
+      <option value="tracked">In Sonarr/Radarr</option>
+      <option value="untracked">Not in *arr</option>
+    </select>
+  </label>
+  <button type="button" class="btn btn-secondary btn-xs" onclick="clearFilters()"
+          title="Reset search and filters">Clear</button>
 </div>
 
 <!-- Table view -->
@@ -139,8 +154,8 @@
       <th class="sortable-th" data-col="status" onclick="sortTable('status')">Watch Status <span class="sort-indicator">↕</span></th>
       <th>Airing</th>
       <th class="sortable-th" data-col="progress" onclick="sortTable('progress')">Progress <span class="sort-indicator">↕</span></th>
-      <th>Local</th>
-      <th>*arr</th>
+      <th class="sortable-th" data-col="local" onclick="sortTable('local')">Local <span class="sort-indicator">↕</span></th>
+      <th class="sortable-th" data-col="arr" onclick="sortTable('arr')">*arr <span class="sort-indicator">↕</span></th>
       <th>Actions</th>
     </tr>
   </thead>
@@ -164,6 +179,8 @@
       data-status="{{ ls }}"
       data-local="{{ entry.local_status }}"
       data-arr="{{ entry.arr_status }}"
+      data-sort-local="{{ entry.local_status }}"
+      data-sort-arr="{{ entry.arr_status }}{{ entry.arr_service }}"
       data-title="{{ entry.anilist_title | lower }} {{ (entry.title_romaji or '') | lower }} {{ (entry.title_english or '') | lower }} {{ (entry.title_native or '') | lower }} {{ (entry.title_synonyms or '') | lower }}"
       data-sort-title="{{ entry.anilist_title | lower }}"
       data-sort-format="{{ (entry.anilist_format or '') | lower }}"
@@ -605,19 +622,35 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     applyFilters();
   };
 
+  function matchesLocalArr(local, arr) {
+    var localWant = document.getElementById('localFilter').value;
+    var arrWant = document.getElementById('arrFilter').value;
+    if (localWant && local !== localWant) return false;
+    if (arrWant === 'untracked' && arr !== 'untracked') return false;
+    if (arrWant === 'tracked' && arr === 'untracked') return false;
+    return true;
+  }
+
+  window.clearFilters = function() {
+    document.getElementById('searchInput').value = '';
+    document.getElementById('localFilter').value = '';
+    document.getElementById('arrFilter').value = '';
+    applyFilters();
+  };
+
   window.applyFilters = function() {
     var search = document.getElementById('searchInput').value.toLowerCase();
-    var missingOnly = document.getElementById('missingOnly').checked;
     // Table rows
     var rows = document.querySelectorAll('#tableBody tr');
     var visible = 0;
     rows.forEach(function(row) {
       var status = row.getAttribute('data-status') || '';
       var local = row.getAttribute('data-local') || '';
+      var arr = row.getAttribute('data-arr') || '';
       var title = row.getAttribute('data-title') || '';
       var show = true;
       if (currentFilter !== 'ALL' && status !== currentFilter) show = false;
-      if (missingOnly && local !== 'missing') show = false;
+      if (!matchesLocalArr(local, arr)) show = false;
       if (search && !title.includes(search)) show = false;
       row.style.display = show ? '' : 'none';
       if (show) visible++;
@@ -626,10 +659,11 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     document.querySelectorAll('#gridView .media-card').forEach(function(card) {
       var status = card.getAttribute('data-status') || '';
       var local = card.getAttribute('data-local') || '';
+      var arr = card.getAttribute('data-arr') || '';
       var title = card.getAttribute('data-title') || '';
       var show = true;
       if (currentFilter !== 'ALL' && status !== currentFilter) show = false;
-      if (missingOnly && local !== 'missing') show = false;
+      if (!matchesLocalArr(local, arr)) show = false;
       if (search && !title.includes(search)) show = false;
       card.classList.toggle('hidden', !show);
     });
@@ -1499,8 +1533,8 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       var data = await resp.json();
       if (data.ok) {
         closeWatchlistDetail();
+        markUnlinkedInPlace(anilistId);
         showToast('Unlinked "' + title + '" — you can now link it to the correct series.');
-        setTimeout(function() { window.location.reload(); }, 900);
       } else {
         alert('Unlink failed: ' + (data.error || 'unknown error'));
       }
@@ -1536,6 +1570,67 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       btn.textContent = orig;
     }
   };
+
+  function markUnlinkedInPlace(anilistId) {
+    for (var i = 0; i < ENTRIES.length; i++) {
+      if (ENTRIES[i].anilist_id === anilistId) {
+        ENTRIES[i].arr_status = 'untracked';
+        ENTRIES[i].arr_service = '';
+        ENTRIES[i].sonarr_id = null;
+        ENTRIES[i].radarr_id = null;
+        ENTRIES[i].arr_has_file = false;
+        // Files on disk stay on disk — only the *arr link is gone.
+        ENTRIES[i].local_status = ENTRIES[i].folder_path ? 'have' : 'missing';
+        break;
+      }
+    }
+
+    var entry = null;
+    for (var j = 0; j < ENTRIES.length; j++) {
+      if (ENTRIES[j].anilist_id === anilistId) { entry = ENTRIES[j]; break; }
+    }
+    var title = (entry && entry.anilist_title) || '';
+    var hasFolder = !!(entry && entry.folder_path);
+
+    document.querySelectorAll('#tableBody tr').forEach(function(row) {
+      // The linked row is the one carrying this entry's unlink button.
+      var mark = row.querySelector('button[onclick*="unlinkFromArr(' + anilistId + ',"]');
+      if (!mark) return;
+
+      row.setAttribute('data-arr', 'untracked');
+      row.setAttribute('data-local', hasFolder ? 'have' : 'missing');
+
+      var cells = row.querySelectorAll('td');
+      if (cells[8]) {
+        cells[8].innerHTML = hasFolder
+          ? '<span class="local-have">Have</span>'
+          : '<span class="local-missing">Missing</span>';
+      }
+      if (cells[9]) cells[9].innerHTML = '';
+      if (cells[10]) {
+        var html = '<div class="action-btns">' +
+          '<button class="btn btn-secondary btn-xs" title="Add to Sonarr/Radarr" ' +
+          'onclick="previewAdd(' + anilistId + ',\'' + escAttr(title) + '\',this)">+ Add</button>';
+        if (hasFolder) {
+          html += '<button class="btn btn-secondary btn-xs" ' +
+            'title="Move this on-disk folder into its standardized library location" ' +
+            'onclick="openSmartMoveWl(' + anilistId + ',this)">Fix Location</button>';
+        }
+        cells[10].innerHTML = html + '</div>';
+      }
+    });
+
+    document.querySelectorAll('#gridView .media-card').forEach(function(card) {
+      var mark = card.querySelector('button[onclick*="unlinkFromArr(' + anilistId + ',"]');
+      if (!mark) return;
+      card.setAttribute('data-arr', 'untracked');
+      card.setAttribute('data-local', hasFolder ? 'have' : 'missing');
+    });
+  }
+
+  function escAttr(v) {
+    return String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  }
 
   // Light up any row whose entry has since been linked in the background.
   function reconcileLinkedRows(delays) {
