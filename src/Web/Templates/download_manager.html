@@ -188,7 +188,7 @@
                     {% if req.tvdb_id %}TVDB:{{ req.tvdb_id }}{% endif %}
                     {% if req.tmdb_id %}TMDB:{{ req.tmdb_id }}{% endif %}
                 </td>
-                <td class="text-sm text-muted">{{ req.created_at[:16] if req.created_at else '' }}</td>
+                <td class="text-sm text-muted">{{ (req.created_at | localtime)[:16] if req.created_at else '' }}</td>
             </tr>
             {% endfor %}
         </tbody>

@@ -6,7 +6,6 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -19,6 +18,7 @@ from src.Scheduler.Jobs import JobScheduler
 from src.Sync.CacheSynonymsBackfill import backfill_cache_synonyms
 from src.Sync.WatchlistRefresh import watchlist_activity_loop
 from src.Utils.Config import AppConfig
+from src.Utils.Time import to_local, to_local_date
 from src.Web.ActivityTracker import ActivityTracker
 
 logger = logging.getLogger(__name__)
@@ -127,18 +127,16 @@ def create_app(
     app.state.activity_tracker = ActivityTracker()
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-    def _utc_to_local(utc_str: str) -> str:
-        """Convert a UTC datetime string from SQLite to the container's local time."""
-        if not utc_str:
-            return utc_str
-        try:
-            dt = datetime.strptime(utc_str[:19], "%Y-%m-%d %H:%M:%S")
-            dt_local = dt.replace(tzinfo=timezone.utc).astimezone()
-            return dt_local.strftime("%Y-%m-%d %H:%M:%S")
-        except (ValueError, TypeError):
-            return utc_str
+    # All stored timestamps are UTC; render them in the TZ the operator
+    # configured so scheduled runs do not appear hours in the future.
+    def _localtime(value: object) -> str:
+        return to_local(value, tz_name=config.timezone)  # type: ignore[arg-type]
 
-    templates.env.filters["localtime"] = _utc_to_local
+    def _localdate(value: object) -> str:
+        return to_local_date(value, tz_name=config.timezone)  # type: ignore[arg-type]
+
+    templates.env.filters["localtime"] = _localtime
+    templates.env.filters["localdate"] = _localdate
     app.state.templates = templates
     app.state.background_tasks = set()  # prevent GC of fire-and-forget tasks
     # Map of task_key -> asyncio.Task for cancellable long-running ops.

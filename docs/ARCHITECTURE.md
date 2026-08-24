@@ -683,7 +683,28 @@ Anilist-Link/
 
 New `app_settings` keys for the Rate Your Completed Shows / Glance feature: `anilist.score_format`, `anilist.score_format_updated_at`, `app.show_unrated_completed`, `glance.api_key` — no schema migration required, `user_watchlist.score` already existed in the v1 baseline.
 
-### 10.2. In-Memory Cache
+### 10.2. Timestamps & Timezones
+
+**All timestamps are stored in UTC.** Every `created_at` / `applied_at` /
+`executed_at` / `synced_at` column defaults to SQLite's `datetime('now')`, and
+the Python writers use `datetime.now(timezone.utc)`. Nothing in the database is
+local time.
+
+Conversion happens once, at render time:
+
+| Layer | Responsibility |
+|-------|----------------|
+| `src/Utils/Time.py` | `get_timezone()` resolves `TZ` (via `zoneinfo`, falling back to system local then UTC); `parse_utc()` accepts both the SQLite `YYYY-MM-DD HH:MM:SS` form and ISO-8601 with `T`/`Z`/offsets; `to_local()` / `to_local_date()` format in the configured zone |
+| `src/Web/App.py` | Registers the `localtime` and `localdate` Jinja filters bound to `config.timezone` |
+| Templates | Render every stored timestamp through `\| localtime` or `\| localdate` — never raw |
+| `src/Scheduler/Jobs.py` | `AsyncIOScheduler` and every `CronTrigger` are constructed with an explicit `tzinfo` rather than letting APScheduler guess via tzlocal |
+| `Dockerfile` / `entrypoint.sh` | Install `tzdata` and point `/etc/localtime` + `/etc/timezone` at `$TZ` so the zone resolves at all |
+
+Rendering a stored value raw is the bug this exists to prevent: a job that ran at
+02:00 America/Los_Angeles is stored as 09:00 UTC and, printed unconverted, shows
+as an hour that has not happened yet.
+
+### 10.3. In-Memory Cache
 
 Short-lived caching of frequently accessed data during active scan/sync operations. Rate limit state is maintained in the `RateLimiter` instance on the `AniListClient`.
 

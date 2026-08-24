@@ -127,13 +127,13 @@
                 <span>{{ plan.group_count }} show{% if plan.group_count != 1 %}s{% endif %},
                       {{ plan.file_count }} file{% if plan.file_count != 1 %}s{% endif %}</span>
                 <span>{{ plan.level | replace('_', ' ') | title }}</span>
-                <span title="{{ plan.created_at }}">
-                    {{ plan.created_at.split('T')[0] if 'T' in plan.created_at else plan.created_at.split(' ')[0] }}
-                    {{ plan.created_at.split('T')[1].split('.')[0] if 'T' in plan.created_at else (plan.created_at.split(' ')[1] if ' ' in plan.created_at else '') }}
+                <span title="{{ plan.created_at | localtime }}">
+                    {{ plan.created_at | localdate }}
+                    {{ (plan.created_at | localtime)[11:19] }}
                 </span>
                 {% if plan.applied_at %}
                 <span class="text-muted">Applied:
-                    {{ plan.applied_at.split('T')[0] if 'T' in plan.applied_at else plan.applied_at.split(' ')[0] }}
+                    {{ plan.applied_at | localdate }}
                 </span>
                 {% endif %}
             </div>
@@ -216,9 +216,9 @@
                         {% endif %}
                     </td>
                     <td style="white-space:nowrap;color:var(--text-muted)">
-                        {{ e.executed_at.split('T')[0] if 'T' in e.executed_at else e.executed_at.split(' ')[0] }}
+                        {{ e.executed_at | localdate }}
                         <div style="font-size:0.72rem">
-                            {{ e.executed_at.split('T')[1].split('.')[0] if 'T' in e.executed_at else e.executed_at.split(' ')[1] if ' ' in e.executed_at else '' }}
+                            {{ (e.executed_at | localtime)[11:19] }}
                         </div>
                     </td>
                 </tr>
