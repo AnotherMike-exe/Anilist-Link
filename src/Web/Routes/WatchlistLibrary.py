@@ -1102,6 +1102,15 @@ async def resolve_arr_match(request: Request) -> JSONResponse:
     anilist_format, anilist_title = await _get_entry_info(db, anilist_id)
     is_movie = is_movie_format(anilist_format)
 
+    # An id confirmed in the disambiguation picker skips resolution, so a
+    # hand-picked match still gets the same preview — siblings, season
+    # placement, link-vs-add — as an auto-resolved one.
+    tvdb_override = request.query_params.get("tvdb_id")
+    tmdb_override = request.query_params.get("tmdb_id")
+    if tmdb_override:
+        # The picker chose a movie, whatever format AniList reports.
+        is_movie = True
+
     if is_movie:
         if not config.radarr.url or not config.radarr.api_key:
             return JSONResponse({"error": "Radarr not configured"}, status_code=503)
@@ -1109,7 +1118,11 @@ async def resolve_arr_match(request: Request) -> JSONResponse:
         from src.Utils.NamingTranslator import resolve_tmdb_id
 
         client_r = RadarrClient(url=config.radarr.url, api_key=config.radarr.api_key)
-        tmdb_id = await resolve_tmdb_id(anilist_id, anilist_client)
+        tmdb_id = (
+            int(tmdb_override)
+            if tmdb_override
+            else await resolve_tmdb_id(anilist_id, anilist_client)
+        )
         if not tmdb_id:
             try:
                 candidates = await _radarr_title_candidates(
@@ -1175,7 +1188,11 @@ async def resolve_arr_match(request: Request) -> JSONResponse:
 
     client_s = SonarrClient(url=config.sonarr.url, api_key=config.sonarr.api_key)
     try:
-        tvdb_id = await resolve_tvdb_id(anilist_id, anilist_client)
+        tvdb_id = (
+            int(tvdb_override)
+            if tvdb_override
+            else await resolve_tvdb_id(anilist_id, anilist_client)
+        )
         candidates = []
 
         if not tvdb_id:
@@ -1783,13 +1800,15 @@ async def push_alt_titles_endpoint(request: Request) -> JSONResponse:
         await client.close()
 
 
+@router.post("/api/library/unlink-from-arr")
 @router.post("/api/library/unlink-from-sonarr")
-async def unlink_from_sonarr(request: Request) -> JSONResponse:
-    """Remove our DB mapping for an AniList entry regardless of Sonarr state.
+async def unlink_from_arr(request: Request) -> JSONResponse:
+    """Drop our Sonarr/Radarr mapping for an AniList entry.
 
-    Use when the Sonarr series was deleted externally and the entry is stuck
-    showing as 'in Sonarr' with no way to re-add it.  Does NOT call the
-    Sonarr API — purely a local DB cleanup.
+    Undoes a wrong match — the entry goes back to offering "+ Add" so it can be
+    re-linked to the right series — and unsticks an entry whose *arr item was
+    deleted externally.  Purely a local DB cleanup: it does NOT remove anything
+    from Sonarr or Radarr.
 
     Body JSON: { anilist_id }
     """
@@ -1799,26 +1818,49 @@ async def unlink_from_sonarr(request: Request) -> JSONResponse:
     if not anilist_id:
         return JSONResponse({"error": "anilist_id required"}, status_code=400)
 
+    unlinked: list[str] = []
+
     # Look up sonarr_id before deleting so we can clean season mappings too
     row = await db.fetch_one(
         "SELECT sonarr_id FROM anilist_sonarr_mapping WHERE anilist_id=?",
         (anilist_id,),
     )
-    sonarr_id = row["sonarr_id"] if row else None
-
-    await db.execute(
-        "DELETE FROM anilist_sonarr_mapping WHERE anilist_id=?", (anilist_id,)
-    )
-    if sonarr_id:
+    if row:
+        sonarr_id = row["sonarr_id"]
         await db.execute(
-            "DELETE FROM anilist_sonarr_season_mapping"
-            " WHERE sonarr_id=? AND anilist_id=?",
-            (sonarr_id, anilist_id),
+            "DELETE FROM anilist_sonarr_mapping WHERE anilist_id=?", (anilist_id,)
         )
-    logger.info(
-        "Unlinked anilist_id=%d from Sonarr (sonarr_id=%s)", anilist_id, sonarr_id
+        if sonarr_id:
+            await db.execute(
+                "DELETE FROM anilist_sonarr_season_mapping"
+                " WHERE sonarr_id=? AND anilist_id=?",
+                (sonarr_id, anilist_id),
+            )
+        unlinked.append("sonarr")
+        logger.info(
+            "Unlinked anilist_id=%d from Sonarr (sonarr_id=%s)", anilist_id, sonarr_id
+        )
+
+    row = await db.fetch_one(
+        "SELECT radarr_id FROM anilist_radarr_mapping WHERE anilist_id=?",
+        (anilist_id,),
     )
-    return JSONResponse({"ok": True, "anilist_id": anilist_id})
+    if row:
+        await db.execute(
+            "DELETE FROM anilist_radarr_mapping WHERE anilist_id=?", (anilist_id,)
+        )
+        unlinked.append("radarr")
+        logger.info(
+            "Unlinked anilist_id=%d from Radarr (radarr_id=%s)",
+            anilist_id,
+            row["radarr_id"],
+        )
+
+    # A wrong match may also sit in the 24h failed-resolution cache; clear it so
+    # re-adding isn't silently skipped.
+    await db.execute("DELETE FROM anilist_arr_skip WHERE anilist_id=?", (anilist_id,))
+
+    return JSONResponse({"ok": True, "anilist_id": anilist_id, "unlinked": unlinked})
 
 
 @router.post("/api/library/backfill-sonarr-siblings")
