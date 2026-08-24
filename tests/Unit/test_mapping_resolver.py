@@ -242,3 +242,36 @@ async def test_path_sync_failure_does_not_fail_the_link(tmp_path) -> None:
 
     assert result.ok
     assert result.arr_id == 7
+
+
+@pytest.mark.asyncio
+async def test_defer_path_sync_keeps_the_add_off_the_slow_path(tmp_path) -> None:
+    """Interactive callers defer the path sync so the request returns promptly.
+
+    The sync costs several *arr and AniList round trips and doesn't change the
+    add's outcome, which is why the confirm dialog used to sit on "Adding…"
+    long after Sonarr had accepted the series.
+    """
+    library = tmp_path / "anime"
+    (library / "Cowboy Bebop").mkdir(parents=True)
+
+    sonarr = _make_sonarr("/old/tv/Cowboy Bebop")
+    resolver = MappingResolver(
+        db=_make_db(str(library), "Cowboy Bebop"),
+        anilist_client=MagicMock(),
+        sonarr_client=sonarr,
+        config=_make_config(),
+        defer_path_sync=True,
+    )
+
+    result = await resolver.add_to_sonarr(
+        anilist_id=1,
+        title="Cowboy Bebop",
+        tvdb_id=76885,
+        quality_profile_id=1,
+        root_folder_path="/old/tv",
+    )
+
+    assert result.ok
+    assert sonarr.updated_to == []  # deferred, not skipped — the caller runs it
+    assert sonarr.rescanned == []

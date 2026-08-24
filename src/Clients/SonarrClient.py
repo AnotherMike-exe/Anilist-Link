@@ -59,9 +59,29 @@ class SonarrClient(ServarrBaseClient):
         return await self._get_by_id("series", series_id)
 
     async def get_series_by_tvdb_id(self, tvdb_id: int) -> dict[str, Any] | None:
-        """Find a series in Sonarr by TVDB ID."""
-        all_series = await self.get_all_series()
-        for s in all_series:
+        """Find a series in Sonarr by TVDB ID.
+
+        Asks Sonarr to filter server-side; fetching the whole library just to
+        scan it makes every add carry a multi-megabyte response.  Older or
+        unexpected responses are filtered client-side anyway, so a server that
+        ignores the parameter still gives the right answer.
+        """
+        try:
+            resp = await self._http.get(
+                self._endpoint("series"), params={"tvdbId": tvdb_id}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            logger.debug(
+                "tvdbId-filtered series lookup failed; falling back to full list",
+                exc_info=True,
+            )
+            data = await self.get_all_series()
+
+        if isinstance(data, dict):
+            data = [data]
+        for s in data or []:
             if s.get("tvdbId") == tvdb_id:
                 return s
         return None

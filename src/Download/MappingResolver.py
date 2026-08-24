@@ -52,6 +52,7 @@ class MappingResolver:
         radarr_client: RadarrClient | None = None,
         config: AppConfig | None = None,
         app_state: object | None = None,
+        defer_path_sync: bool = False,
     ) -> None:
         self._db = db
         self._anilist = anilist_client
@@ -62,6 +63,10 @@ class MappingResolver:
         # Optional — lets the path sync walk the franchise chain when resolving
         # where a movie is nested; without it the walk degrades to a flat folder.
         self._app_state = app_state
+        # Interactive callers defer the path sync: it costs several *arr and
+        # AniList round trips, and the user's answer (added / linked) is already
+        # known without it.  They run it in the background instead.
+        self._defer_path_sync = defer_path_sync
 
     async def _sync_arr_path(
         self, service: str, arr_id: int | None, anilist_id: int
@@ -76,7 +81,7 @@ class MappingResolver:
         Never moves files and never raises — a stale path is worth fixing, but
         not at the cost of failing the add the user actually asked for.
         """
-        if not self._config or not arr_id:
+        if not self._config or not arr_id or self._defer_path_sync:
             return
         try:
             from src.Download.ArrPostProcessor import ArrPostProcessor

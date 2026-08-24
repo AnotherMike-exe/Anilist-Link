@@ -1100,6 +1100,17 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     var confirmBtn = document.getElementById('confirmMatchBtn');
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Adding\u2026';
+    // A slow Sonarr/Radarr shouldn't look like a hang. Say so rather than
+    // sitting on "Adding…" with no explanation.
+    var slowTimer = setTimeout(function() {
+      confirmBtn.textContent = 'Still working\u2026';
+      var sib = document.getElementById('matchSiblings');
+      if (sib) {
+        sib.textContent = 'Waiting on Sonarr/Radarr — this can take a moment on a large library.';
+        sib.style.display = '';
+      }
+    }, 6000);
+    function clearSlowTimer() { clearTimeout(slowTimer); }
 
     var monitorMode = document.getElementById('matchMonitorMode').value;
     var body = { anilist_id: _preview.anilistId, monitor_strategy: monitorMode };
@@ -1112,6 +1123,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       body: JSON.stringify(body)
     }).then(function(r) { return r.json(); })
       .then(function(data) {
+        clearSlowTimer();
         document.getElementById('matchPreviewModal').classList.add('hidden');
         if (data.ok) {
           onAddSuccess(_preview.anilistId, data.service, _preview.btn, data.arr_id);
@@ -1126,6 +1138,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
         _preview.btn = null;
       })
       .catch(function(e) {
+        clearSlowTimer();
         showToast('Request failed: ' + e.message, 'error');
         confirmBtn.disabled = false;
         confirmBtn.textContent = 'Add';

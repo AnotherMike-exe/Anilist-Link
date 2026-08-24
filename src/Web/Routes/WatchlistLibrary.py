@@ -635,6 +635,78 @@ async def _auto_link_sonarr_siblings(
         )
 
 
+async def _post_add_followups(
+    db: Any,
+    anilist_client: Any,
+    config: Any,
+    app_state: Any,
+    anilist_id: int,
+    service: str,
+    arr_id: int,
+    external_id: int | None,
+) -> None:
+    """Finish an add after the response has already gone back to the user.
+
+    Pushes AniList title variants so Sonarr can match releases, links the rest
+    of the sequel chain, and repoints the *arr record at the library folder.
+    None of it changes whether the add succeeded, so none of it belongs on the
+    request.  Failures are logged and never surface.
+    """
+    if service == "sonarr" and config.sonarr.url and config.sonarr.api_key:
+        client = SonarrClient(url=config.sonarr.url, api_key=config.sonarr.api_key)
+        try:
+            media_data = await anilist_client._execute_query(
+                GET_FULL_MEDIA_QUERY, {"id": anilist_id}
+            )
+            full_media = media_data.get("Media", {})
+            if full_media:
+                alt_titles = [
+                    t for t in build_title_chain(full_media) if t and len(t) > 2
+                ]
+                if alt_titles:
+                    await client.push_alt_titles(arr_id, alt_titles)
+                    logger.info(
+                        "Pushed %d alt titles to Sonarr for anilist_id=%d",
+                        len(alt_titles),
+                        anilist_id,
+                    )
+        except Exception as exc:
+            logger.warning("Could not push alt titles to Sonarr: %s", exc)
+        finally:
+            await client.close()
+
+        if external_id:
+            # Ends with its own path sync, once the series group exists.
+            await _auto_link_sonarr_siblings(
+                db=db,
+                anilist_client=anilist_client,
+                root_anilist_id=anilist_id,
+                tvdb_id=external_id,
+                sonarr_id=arr_id,
+                sonarr_url=config.sonarr.url,
+                sonarr_api_key=config.sonarr.api_key,
+                config=config,
+                app_state=app_state,
+            )
+        return
+
+    if service == "radarr":
+        try:
+            from src.Download.ArrPostProcessor import ArrPostProcessor
+
+            processor = ArrPostProcessor(db=db, config=config, app_state=app_state)
+            result = await processor.sync_radarr_movie_path(arr_id, anilist_id)
+            logger.debug(
+                "Post-add path sync for radarr_id=%d: %s",
+                arr_id,
+                result.get("action"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Post-add path sync failed for radarr_id=%d: %s", arr_id, exc
+            )
+
+
 @router.post("/api/library/add-to-arr")
 async def add_to_arr(request: Request) -> JSONResponse:
     """Add an AniList entry to Sonarr or Radarr.
@@ -707,6 +779,9 @@ async def add_to_arr(request: Request) -> JSONResponse:
         radarr_client=radarr_client,
         config=config,
         app_state=request.app.state,
+        # Everything after the add itself runs in the background — see
+        # _post_add_followups.
+        defer_path_sync=True,
     )
 
     media: dict[str, Any] = {"title": {"romaji": anilist_title}, "synonyms": []}
@@ -725,48 +800,25 @@ async def add_to_arr(request: Request) -> JSONResponse:
             tmdb_id_override=tmdb_id_override,
         )
 
-        # Auto-link sequels/prequels that share the same Sonarr series
-        if (
-            result.ok
-            and result.arr_id
-            and result.external_id
-            and result.service == "sonarr"
-        ):
+        # Everything below the add — alt titles, sibling linking, path sync —
+        # costs several *arr and AniList round trips and doesn't change the
+        # answer the user is waiting for.  Doing it inline left the confirm
+        # dialog sitting on "Adding…" long after Sonarr had already accepted
+        # the series, so it runs in the background instead.
+        if result.ok and result.arr_id:
             spawn_background_task(
                 request.app.state,
-                _auto_link_sonarr_siblings(
+                _post_add_followups(
                     db=db,
                     anilist_client=anilist_client,
-                    root_anilist_id=anilist_id,
-                    tvdb_id=result.external_id,
-                    sonarr_id=result.arr_id,
-                    sonarr_url=config.sonarr.url,
-                    sonarr_api_key=config.sonarr.api_key,
                     config=config,
                     app_state=request.app.state,
+                    anilist_id=anilist_id,
+                    service=result.service,
+                    arr_id=result.arr_id,
+                    external_id=result.external_id,
                 ),
             )
-
-        # Push all AniList title variants to Sonarr so it can find releases
-        if result.ok and result.arr_id and sonarr_client:
-            try:
-                media_data = await anilist_client._execute_query(
-                    GET_FULL_MEDIA_QUERY, {"id": anilist_id}
-                )
-                full_media = media_data.get("Media", {})
-                if full_media:
-                    alt_titles = [
-                        t for t in build_title_chain(full_media) if t and len(t) > 2
-                    ]
-                    if alt_titles:
-                        await sonarr_client.push_alt_titles(result.arr_id, alt_titles)
-                        logger.info(
-                            "Pushed %d alt titles to Sonarr for anilist_id=%d",
-                            len(alt_titles),
-                            anilist_id,
-                        )
-            except Exception as exc:
-                logger.warning("Could not push alt titles to Sonarr: %s", exc)
     finally:
         if sonarr_client:
             await sonarr_client.close()
