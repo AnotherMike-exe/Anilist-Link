@@ -173,6 +173,11 @@ FIELD_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
                 "TV / Everything Else output directory",
                 "dir_picker_single",
             ),
+            (
+                "library.import_path",
+                "Import folder (drop media here for review)",
+                "dir_picker_single",
+            ),
         ],
     ),
     (

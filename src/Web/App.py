@@ -174,6 +174,7 @@ def create_app(
     from src.Web.Routes.Dashboard import router as dashboard_router
     from src.Web.Routes.Downloads import router as downloads_router
     from src.Web.Routes.Glance import router as glance_router
+    from src.Web.Routes.Import import router as import_router
     from src.Web.Routes.JellyfinLibrary import router as jellyfin_library_router
     from src.Web.Routes.JellyfinScan import router as jellyfin_scan_router
     from src.Web.Routes.JellyfinWebhook import router as jellyfin_webhook_router
@@ -201,6 +202,7 @@ def create_app(
     app.include_router(cr_sync_router)
     app.include_router(dashboard_router)
     app.include_router(glance_router)
+    app.include_router(import_router)
     app.include_router(jellyfin_library_router)
     app.include_router(jellyfin_scan_router)
     app.include_router(jellyfin_webhook_router)

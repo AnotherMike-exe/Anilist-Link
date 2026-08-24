@@ -314,6 +314,9 @@
           <button class="btn btn-secondary btn-xs"
                   onclick="openSmartMoveWl({{ aid }}, this)"
                   title="Move this on-disk folder into its standardized library location (does not require Sonarr/Radarr)">Fix Location</button>
+          <button class="btn btn-secondary btn-xs"
+                  onclick="rescanEntryFolder({{ aid }}, this)"
+                  title="Re-scan this entry's folder for files you added by hand: renames and files them into the right season folders, then tells Sonarr/Radarr where they went.">Re-scan Folder</button>
           {% endif %}
         </div>
       </td>
@@ -1717,6 +1720,56 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
   // Back-compat alias — the handler used to be Sonarr-only.
   window.unlinkFromSonarr = function(anilistId, title) {
     return window.unlinkFromArr(anilistId, title);
+  };
+
+  // Files dropped into an entry's folder by hand: preview first, then file
+  // them and tell *arr, so the episodes stop reading as missing.
+  window.rescanEntryFolder = async function(anilistId, btn) {
+    btn.disabled = true;
+    var orig = btn.textContent;
+    btn.textContent = '\u2026';
+    try {
+      var resp = await fetch('/api/import/entry/preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({anilist_id: anilistId})
+      });
+      var d = await resp.json();
+      if (!d.ok) { showToast(d.error || 'Preview failed', 'error'); return; }
+      if (!d.moves || !d.moves.length) {
+        showToast(
+          (d.warnings && d.warnings.length)
+            ? d.warnings.join('\n')
+            : 'Nothing to file — everything in that folder is already in place.',
+          'success');
+        return;
+      }
+      var lines = ['File ' + d.moves.length + ' item(s) into ' + (d.target_folder || 'the library') + '?'];
+      d.moves.slice(0, 6).forEach(function(m) { lines.push('  → ' + m.to); });
+      if (d.moves.length > 6) lines.push('  …and ' + (d.moves.length - 6) + ' more');
+      (d.warnings || []).forEach(function(w) { lines.push('! ' + w); });
+      if (!confirm(lines.join('\n'))) return;
+
+      btn.textContent = 'Filing\u2026';
+      var r2 = await fetch('/api/import/entry/execute', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({anilist_id: anilistId})
+      });
+      var res = await r2.json();
+      if (!res.ok) { showToast(res.error || 'Import failed', 'error'); return; }
+      var arr = res.arr || {};
+      var note = arr.service
+        ? (arr.error ? ' — ' + arr.service + ' notify failed: ' + arr.error
+                     : ' — ' + arr.service + ' rescanned')
+        : ' — not linked to Sonarr/Radarr';
+      showToast('Filed ' + res.moved + ' file(s)' + note, res.errors ? 'error' : 'success');
+    } catch (e) {
+      showToast('Re-scan failed: ' + e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
   };
 
   window.reprocessEntry = async function(service, arrId, btn, dryRun) {

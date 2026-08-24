@@ -112,6 +112,24 @@
     {% endif %}
   </div>
 
+  <!-- Import — media acquired by hand -->
+  <div class="tool-card">
+    <div class="tool-card-icon">📥</div>
+    <div class="tool-card-body">
+      <h2>Import</h2>
+      <p>Bring in media you fetched yourself — the cases Sonarr and Radarr can't find a
+         release for, like a season AniList splits but TVDB doesn't.</p>
+      <p style="margin-top:0.4rem">Drop files in the import folder, review the AniList match,
+         and they're renamed and filed like any restructure — then Sonarr/Radarr is told
+         where they landed so the episodes stop showing as missing.</p>
+      <p class="tool-card-meta">Per-entry "Re-scan Folder" on the watchlist does the same
+         for files dropped straight into a show's own folder.</p>
+    </div>
+    <div class="tool-card-actions">
+      <a href="/import" class="btn btn-primary">Open</a>
+    </div>
+  </div>
+
   <!-- Fallback if nothing configured -->
   {% if not plex_configured and not jellyfin_configured and not crunchyroll_configured and not has_library %}
   <div class="tool-card" style="grid-column:1/-1">
