@@ -14,6 +14,9 @@ services:
     volumes:
       - ./config:/config
       - ./media/anime:/media/anime
+      # Drop media you fetched by hand into the host side of this mapping,
+      # then review and import it at /import. Must match LIBRARY_IMPORT_PATH.
+      - ./media/import:/media/import
     environment:
       - PUID=99
       - PGID=100

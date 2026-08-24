@@ -69,3 +69,40 @@ def test_settings_map_env_vars_are_unique() -> None:
             clashes.append(f"{env_var}: {seen[env_var]} and {key}")
         seen[env_var] = key
     assert not clashes, f"Duplicate env vars: {clashes}"
+
+
+# ---------------------------------------------------------------------------
+# .env.example must describe env vars that actually exist
+# ---------------------------------------------------------------------------
+
+# Read directly from the environment rather than through SETTINGS_MAP.
+DIRECT_ENV_VARS = {"TZ", "HOST", "PORT", "PUID", "PGID", "UMASK"}
+
+
+def _env_example_vars() -> list[str]:
+    names: list[str] = []
+    for line in Path(".env.example").read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        names.append(line.split("=", 1)[0].strip())
+    return names
+
+
+def test_env_example_only_lists_real_variables() -> None:
+    """A typo'd or renamed var in the sample is silently ignored at runtime."""
+    from src.Utils.Config import SETTINGS_MAP
+
+    known = {env for env, _default in SETTINGS_MAP.values()} | DIRECT_ENV_VARS
+    unknown = [v for v in _env_example_vars() if v not in known]
+    assert not unknown, f".env.example lists variables nothing reads: {unknown}"
+
+
+def test_env_example_documents_the_import_folder() -> None:
+    """The import folder needs a host mapping, so the sample must mention it."""
+    assert "LIBRARY_IMPORT_PATH" in _env_example_vars()
+    compose = Path("docker-compose.yml").read_text()
+    assert "/media/import" in compose, (
+        "docker-compose.yml needs a volume for the import folder, or the "
+        "configured path won't exist inside the container"
+    )
