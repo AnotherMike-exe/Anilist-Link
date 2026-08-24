@@ -445,6 +445,10 @@ async def _auto_link_sonarr_siblings(
 
         # Season assignment: prefer 1:1 when counts match, else try cumulative
         season_map: dict[int, int | None] = {}
+        # anilist_id -> (episode_start, episode_end) within its Sonarr season.
+        # Only populated by the cumulative branch; a 1:1 entry owns its whole
+        # season and is stored as (1, None).
+        episode_ranges: dict[int, tuple[int, int | None]] = {}
         if sonarr_seasons and len(chain) == len(sonarr_seasons):
             # Perfect 1:1 chronological assignment
             for idx, aid in enumerate(chain):
@@ -473,6 +477,14 @@ async def _auto_link_sonarr_siblings(
                 for s_start, s_end, sn in sonarr_ranges:
                     if anilist_start <= s_end:
                         assigned = sn
+                        # Convert the absolute chain position into the season's
+                        # own numbering — that is what Sonarr labels episodes
+                        # with, and what the post-processor matches against.
+                        rel_start = anilist_start - s_start + 1
+                        episode_ranges[aid] = (
+                            max(1, rel_start),
+                            max(1, rel_start) + eps - 1 if eps else None,
+                        )
                         break
                 season_map[aid] = assigned
                 anilist_start += eps
@@ -480,7 +492,7 @@ async def _auto_link_sonarr_siblings(
             logger.info(
                 "Season assignment (cumulative) for tvdb_id=%d: %s",
                 tvdb_id,
-                {aid: season_map[aid] for aid in chain},
+                {aid: (season_map[aid], episode_ranges.get(aid)) for aid in chain},
             )
         else:
             for aid in chain:
@@ -567,14 +579,24 @@ async def _auto_link_sonarr_siblings(
         # Populate anilist_sonarr_season_mapping for the post-processor.
         # Use INSERT OR REPLACE so re-adding a series always corrects stale mappings.
         mapped_count = 0
+        # Replace this series' ranges wholesale: a re-run may split a season
+        # that was previously stored as one whole-season row, and leaving the
+        # old row behind would keep matching every episode.
+        if any(season_map.get(aid) is not None for aid in chain):
+            await db.execute(
+                "DELETE FROM anilist_sonarr_season_mapping WHERE sonarr_id=?",
+                (sonarr_id,),
+            )
         for aid in chain:
             s_num = season_map.get(aid)
             if s_num is not None:
+                ep_start, ep_end = episode_ranges.get(aid, (1, None))
                 await db.execute(
                     """INSERT OR REPLACE INTO anilist_sonarr_season_mapping
-                       (sonarr_id, season_number, anilist_id)
-                       VALUES (?, ?, ?)""",
-                    (sonarr_id, s_num, aid),
+                       (sonarr_id, season_number, anilist_id,
+                        episode_start, episode_end)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (sonarr_id, s_num, aid, ep_start, ep_end),
                 )
                 mapped_count += 1
         if mapped_count:

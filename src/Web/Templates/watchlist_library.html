@@ -895,7 +895,15 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
   function onAddSuccess(anilistId, service, btn, arrId) {
     showToast('Added to ' + service + ' successfully', 'success');
     offerMoveToLibrary(anilistId, service, arrId);
+    markLinkedInPlace(anilistId, service, arrId);
+    // Sibling seasons are linked by a background task that starts after this
+    // response returns, so poll briefly and light up those rows too. Without
+    // this they keep showing "+ Add" until a reload — which would drop the
+    // user's search filter, so nobody reloads and every season looks unlinked.
+    reconcileLinkedRows();
+  }
 
+  function markLinkedInPlace(anilistId, service, arrId) {
     // Update the in-memory ENTRIES array so the detail modal reflects the new state
     for (var i = 0; i < ENTRIES.length; i++) {
       if (ENTRIES[i].anilist_id === anilistId) {
@@ -1515,6 +1523,41 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       btn.textContent = orig;
     }
   };
+
+  // Light up any row whose entry has since been linked in the background.
+  function reconcileLinkedRows(delays) {
+    (delays || [1500, 4000, 9000]).forEach(function(delay) {
+      setTimeout(function() {
+        fetch('/api/arr/linked')
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            var newly = 0;
+            ['sonarr', 'radarr'].forEach(function(svc) {
+              var map = (data && data[svc]) || {};
+              Object.keys(map).forEach(function(aidStr) {
+                var aid = parseInt(aidStr, 10);
+                // A row still offering "+ Add" hasn't been updated yet.
+                var stillUnlinked = document.querySelector(
+                  '#tableBody button[onclick*="previewAdd(' + aid + ',"]'
+                ) || document.querySelector(
+                  '#gridView button[onclick*="previewAdd(' + aid + ',"]:not([disabled])'
+                );
+                if (!stillUnlinked) return;
+                markLinkedInPlace(aid, svc, map[aidStr] && map[aidStr].arr_id);
+                newly++;
+              });
+            });
+            if (newly) {
+              showToast(
+                newly + ' related season' + (newly === 1 ? '' : 's') +
+                ' linked automatically', 'success'
+              );
+            }
+          })
+          .catch(function() { /* best-effort refresh */ });
+      }, delay);
+    });
+  }
 
   // Linking only repoints *arr at files already in the library layout; it
   // never moves anything. When the files are still in *arr's own folders the

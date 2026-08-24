@@ -55,6 +55,15 @@ def _make_db(
 
     db.fetch_one = fetch_one
 
+    async def fetch_all(query: str, params: tuple = ()) -> list[dict[str, Any]]:
+        # Season resolution reads ranges; this fixture models a single
+        # whole-season mapping (episode 1 onwards, no end).
+        if "anilist_sonarr_season_mapping" in query:
+            return [{"anilist_id": 21234, "episode_start": 1, "episode_end": None}]
+        return []
+
+    db.fetch_all = fetch_all
+
     async def get_users_by_service(service: str) -> list:
         return []
 
@@ -536,6 +545,20 @@ def _make_season_resolve_db(
             return [
                 {"season_number": s, "anilist_id": a}
                 for s, a in sorted(per_season.items())
+            ]
+        # Season lookup is now range-aware: one row per (season, episode range).
+        # These fixtures model whole-season mappings, so each is 1 → open-ended.
+        if "AND season_number=?" in q and "ORDER BY episode_start" in q:
+            season = params[1]
+            aid = per_season.get(season)
+            if aid is None:
+                return []
+            return [
+                {
+                    "anilist_id": aid,
+                    "episode_start": 1,
+                    "episode_end": None,
+                }
             ]
         return []
 

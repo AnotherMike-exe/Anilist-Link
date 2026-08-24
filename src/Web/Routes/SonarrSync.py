@@ -351,6 +351,35 @@ async def arr_mappings(request: Request) -> JSONResponse:
     )
 
 
+@router.get("/api/arr/linked")
+async def arr_linked(request: Request) -> JSONResponse:
+    """Return which AniList entries are currently linked, keyed by id.
+
+    Deliberately lightweight: sibling auto-linking runs in the background after
+    an add returns, so the watchlist polls this to pick up seasons that were
+    linked for it — without a reload, which would drop the user's filter.
+    """
+    db = request.app.state.db
+
+    sonarr: dict[str, dict[str, int | None]] = {}
+    for row in await db.fetch_all(
+        "SELECT anilist_id, sonarr_id, sonarr_season FROM anilist_sonarr_mapping"
+        " WHERE in_sonarr=1"
+    ):
+        sonarr[str(row["anilist_id"])] = {
+            "arr_id": row["sonarr_id"],
+            "season": row["sonarr_season"],
+        }
+
+    radarr: dict[str, dict[str, int | None]] = {}
+    for row in await db.fetch_all(
+        "SELECT anilist_id, radarr_id FROM anilist_radarr_mapping WHERE in_radarr=1"
+    ):
+        radarr[str(row["anilist_id"])] = {"arr_id": row["radarr_id"], "season": None}
+
+    return JSONResponse({"sonarr": sonarr, "radarr": radarr})
+
+
 @router.get("/api/arr/mapping/{anilist_id}")
 async def arr_mapping_detail(request: Request, anilist_id: int) -> JSONResponse:
     """Return the Sonarr/Radarr mapping for a specific AniList ID."""

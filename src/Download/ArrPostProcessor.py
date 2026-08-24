@@ -134,7 +134,9 @@ class ArrPostProcessor:
             )
             return
 
-        anilist_id = await self._resolve_sonarr_anilist_id(sonarr_id, season_number)
+        anilist_id = await self._resolve_sonarr_anilist_id(
+            sonarr_id, season_number, episode_number
+        )
         if not anilist_id:
             logger.info(
                 "No AniList mapping for sonarr_id=%d season=%d — skipping",
@@ -632,7 +634,7 @@ class ArrPostProcessor:
                     season_number = file_season.get(file_id, 1)
                     episode_number = file_episode.get(file_id, 0)
                     anilist_id = await self._resolve_sonarr_anilist_id(
-                        sonarr_id, season_number
+                        sonarr_id, season_number, episode_number
                     )
                     if not anilist_id:
                         continue
@@ -741,7 +743,7 @@ class ArrPostProcessor:
                 season_number = file_season.get(file_id, 1)
                 episode_number = file_episode.get(file_id, 0)
                 anilist_id = await self._resolve_sonarr_anilist_id(
-                    sonarr_id, season_number
+                    sonarr_id, season_number, episode_number
                 )
                 if not anilist_id:
                     logger.info(
@@ -1036,17 +1038,48 @@ class ArrPostProcessor:
     # ------------------------------------------------------------------
 
     async def _resolve_sonarr_anilist_id(
-        self, sonarr_id: int, season_number: int
+        self,
+        sonarr_id: int,
+        season_number: int,
+        episode_number: int | None = None,
     ) -> int | None:
-        """Return the AniList ID for a given Sonarr series + season."""
+        """Return the AniList ID for a Sonarr series + season (+ episode).
+
+        A Sonarr season can map to several AniList entries when the cour is
+        split (Mushoku Tensei S2 Part 1 / Part 2), so *episode_number* selects
+        which part a file belongs to.  Without it — or when the season has a
+        single whole-season mapping — the season's first range is used, which
+        is the 1:1 behaviour.
+        """
         # Per-season mapping takes precedence (multi-season TVDB series)
-        row = await self._db.fetch_one(
-            "SELECT anilist_id FROM anilist_sonarr_season_mapping"
-            " WHERE sonarr_id=? AND season_number=?",
+        rows = await self._db.fetch_all(
+            "SELECT anilist_id, episode_start, episode_end"
+            " FROM anilist_sonarr_season_mapping"
+            " WHERE sonarr_id=? AND season_number=?"
+            " ORDER BY episode_start",
             (sonarr_id, season_number),
         )
-        if row:
-            return int(row["anilist_id"])
+        if rows:
+            if episode_number and len(rows) > 1:
+                for r in rows:
+                    start = int(r["episode_start"] or 1)
+                    end = r["episode_end"]
+                    if episode_number >= start and (
+                        end is None or episode_number <= int(end)
+                    ):
+                        return int(r["anilist_id"])
+                # Past the last known range — an episode aired beyond what the
+                # chain covered. The final part is the best available answer.
+                logger.info(
+                    "sonarr_id=%d S%02dE%02d is past every mapped range;"
+                    " using the last part (anilist_id=%s)",
+                    sonarr_id,
+                    season_number,
+                    episode_number,
+                    rows[-1]["anilist_id"],
+                )
+                return int(rows[-1]["anilist_id"])
+            return int(rows[0]["anilist_id"])
 
         # If season-specific mappings exist for this series but none matched,
         # don't fall back — routing to the wrong AniList entry is worse than
