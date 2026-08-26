@@ -298,6 +298,9 @@
                   onclick="unlinkFromArr({{ aid }}, '{{ entry.anilist_title|e }}')"
                   title="Remove this Sonarr/Radarr link from our database so the entry can be matched to a different series. Does not change Sonarr/Radarr.">Unlink</button>
           <button class="btn btn-secondary btn-xs"
+                  onclick="rescanInArr({{ aid }}, this)"
+                  title="Tell Sonarr/Radarr to look at this entry's folder again. Use when the files are on disk and correctly placed but *arr still lists them as missing. Nothing on disk is touched.">Rescan in *arr</button>
+          <button class="btn btn-secondary btn-xs"
                   onclick="verifyArrLink({{ aid }}, this)"
                   title="Re-check this entry against Sonarr/Radarr: clears the link if it was deleted there, and corrects the stored path if the files have since been restructured. Never moves files.">Verify Link</button>
           {% elif arr_enabled %}
@@ -1720,6 +1723,35 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
   // Back-compat alias — the handler used to be Sonarr-only.
   window.unlinkFromSonarr = function(anilistId, title) {
     return window.unlinkFromArr(anilistId, title);
+  };
+
+  // "The files are there, *arr just hasn't noticed." No preview: nothing on
+  // disk changes, so there is nothing to approve.
+  window.rescanInArr = async function(anilistId, btn) {
+    btn.disabled = true;
+    var orig = btn.textContent;
+    btn.textContent = '\u2026';
+    try {
+      var resp = await fetch('/api/import/entry/rescan-arr', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({anilist_id: anilistId})
+      });
+      var d = await resp.json();
+      if (!d.ok) { showToast(d.error || 'Rescan failed', 'error'); return; }
+      var arr = d.arr || {};
+      showToast(
+        (arr.service ? arr.service.charAt(0).toUpperCase() + arr.service.slice(1) : '*arr') +
+        ' rescanning' +
+        (arr.path_action === 'updated' ? ' (path corrected to ' + (arr.to || 'the library') + ')' : '') +
+        '. Give it a moment, then check whether the episodes still read as missing.',
+        'success');
+    } catch (e) {
+      showToast('Rescan failed: ' + e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
   };
 
   // Files dropped into an entry's folder by hand: preview first, then file

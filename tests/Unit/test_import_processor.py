@@ -153,3 +153,57 @@ async def test_notify_arr_reports_not_linked(tmp_path) -> None:
     proc = ImportProcessor(db=_db(), config=_config())
     result = await proc.notify_arr(1)
     assert result["action"] == "not_linked"
+
+
+@pytest.mark.asyncio
+async def test_already_correct_files_still_notify_arr(tmp_path, monkeypatch) -> None:
+    """Correctly-placed files that *arr has never seen must still trigger a rescan.
+
+    This is the reported case: the restructure moved the files, so there is
+    nothing left to move — but Sonarr still lists the episodes as missing, and
+    returning early without telling it left no way to fix that.
+    """
+    folder = tmp_path / "GATE" / "Season 2"
+    folder.mkdir(parents=True)
+    (folder / "ep01.mkv").write_text("x")
+
+    notified: list[int] = []
+
+    class _NoOpPlan:
+        groups: list = []
+
+    class _Restructurer:
+        async def analyze(self, *a, **kw):
+            return _NoOpPlan()
+
+        async def execute(self, *a, **kw):  # pragma: no cover - never reached
+            raise AssertionError("nothing should be moved")
+
+    async def _from_settings(db, client):
+        return _Restructurer()
+
+    import src.Download.ImportProcessor as IP
+
+    monkeypatch.setattr(IP.LibraryRestructurer, "from_settings", _from_settings)
+
+    db = _db()
+
+    async def get_cached_metadata(anilist_id: int):
+        return {"title_romaji": "GATE", "year": 2015}
+
+    db.get_cached_metadata = get_cached_metadata
+
+    proc = ImportProcessor(db=db, config=_config())
+
+    async def _fake_notify(anilist_id: int):
+        notified.append(anilist_id)
+        return {"service": "sonarr", "rescanned": True}
+
+    proc.notify_arr = _fake_notify  # type: ignore[method-assign]
+
+    result = await proc.execute_folder(str(folder), 42)
+
+    assert result["ok"] is True
+    assert result["moved"] == 0
+    assert notified == [42], "*arr must be told even when nothing moved"
+    assert result["arr"]["rescanned"] is True

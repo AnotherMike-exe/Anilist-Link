@@ -160,6 +160,48 @@ async def import_entry_execute(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+@router.post("/api/import/entry/rescan-arr")
+async def import_entry_rescan_arr(request: Request) -> JSONResponse:
+    """Tell Sonarr/Radarr to re-look at an entry's folder. Body: {anilist_id}.
+
+    For files that are already correctly placed but which *arr has never seen —
+    moved by an earlier restructure, or dropped in by hand — so it reports them
+    missing.  Nothing on disk is touched: the stored path is corrected if it
+    drifted, then a rescan is issued.
+    """
+    app_state = request.app.state
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    anilist_id = int(body.get("anilist_id", 0))
+    if not anilist_id:
+        return JSONResponse({"error": "anilist_id required"}, status_code=400)
+
+    processor = ImportProcessor(
+        db=app_state.db,
+        config=app_state.config,
+        anilist_client=app_state.anilist_client,
+        app_state=app_state,
+    )
+    try:
+        arr = await processor.notify_arr(anilist_id)
+    except Exception as exc:
+        logger.exception("Rescan request failed for anilist_id=%d", anilist_id)
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+    if arr.get("action") == "not_linked":
+        return JSONResponse(
+            {"ok": False, "error": "This entry isn't linked to Sonarr or Radarr."},
+            status_code=400,
+        )
+    if arr.get("error"):
+        return JSONResponse({"ok": False, "error": arr["error"]}, status_code=502)
+
+    return JSONResponse({"ok": True, "arr": arr})
+
+
 # ---------------------------------------------------------------------------
 # Path 2 — the import folder
 # ---------------------------------------------------------------------------

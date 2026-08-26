@@ -206,10 +206,15 @@ class ImportProcessor:
             force_franchise_root=True,
         )
         if not rplan.groups:
+            # Nothing to move, but that does not mean nothing to do: the files
+            # can be correctly placed and *arr still unaware of them, which is
+            # exactly the case this path exists to fix.  Tell it anyway.
+            arr = await self.notify_arr(anilist_id)
             return {
                 "ok": True,
                 "moved": 0,
-                "message": "Already in the correct location.",
+                "message": "Files were already in the correct location.",
+                "arr": arr,
             }
 
         target = rplan.groups[0].target_folder
