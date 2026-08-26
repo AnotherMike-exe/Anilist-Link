@@ -1026,10 +1026,20 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     });
   }
 
+  // Every resolve path ends by handing the Add button back. One restore, so a
+  // path that forgets the busy class can't leave the button stuck wide.
+  function restoreAddBtn(b) {
+    if (!b) return;
+    b.disabled = false;
+    b.classList.remove('is-busy');
+    b._origHtml = null;
+    b.textContent = '+ Add';
+  }
+  window.restoreAddBtn = restoreAddBtn;
+
   // Step 1: resolve the match (no add yet)
   window.previewAdd = function(anilistId, title, btn) {
-    btn.disabled = true;
-    btn.textContent = '\u2026';
+    setBusy(btn, 'Resolving\u2026');
 
     // Show loading modal with animated status
     var loadingModal = document.getElementById('resolveLoadingModal');
@@ -1059,8 +1069,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
         openDisambig(anilistId, btn, title, data.service || 'sonarr', data.candidates || []);
       } else if (!data.resolved) {
         showToast('Could not resolve: ' + (data.error || 'unknown'), 'error');
-        btn.disabled = false;
-        btn.textContent = '+ Add';
+        restoreAddBtn(btn);
       } else {
         openMatchPreview(anilistId, btn, title, data);
       }
@@ -1072,16 +1081,14 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       var msg = '';
       try { msg = JSON.parse(e.data).error; } catch(_) {}
       showToast('Request failed: ' + (msg || 'connection error'), 'error');
-      btn.disabled = false;
-      btn.textContent = '+ Add';
+      restoreAddBtn(btn);
     });
 
     es.onerror = function() {
       es.close();
       clearLoadingState();
       showToast('Connection lost during resolve', 'error');
-      btn.disabled = false;
-      btn.textContent = '+ Add';
+      restoreAddBtn(btn);
     };
   };
 
@@ -1146,10 +1153,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
 
   window.closeMatchPreview = function() {
     document.getElementById('matchPreviewModal').classList.add('hidden');
-    if (_preview.btn) {
-      _preview.btn.disabled = false;
-      _preview.btn.textContent = '+ Add';
-    }
+    restoreAddBtn(_preview.btn);
     _preview.anilistId = null;
     _preview.btn = null;
   };
@@ -1189,10 +1193,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
           onAddSuccess(_preview.anilistId, data.service, _preview.btn, data.arr_id);
         } else {
           showToast('Error: ' + (data.error || 'unknown'), 'error');
-          if (_preview.btn) {
-            _preview.btn.disabled = false;
-            _preview.btn.textContent = '+ Add';
-          }
+          restoreAddBtn(_preview.btn);
         }
         _preview.anilistId = null;
         _preview.btn = null;
@@ -1245,10 +1246,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
 
   window.closeDisambig = function() {
     document.getElementById('disambigModal').classList.add('hidden');
-    if (_disambig.btn) {
-      _disambig.btn.disabled = false;
-      _disambig.btn.textContent = '+ Add';
-    }
+    restoreAddBtn(_disambig.btn);
     _disambig.anilistId = null;
     _disambig.btn = null;
     _disambig.selectedTvdbId = null;
@@ -1374,12 +1372,12 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
           onAddSuccess(anilistId, data.service, btn, data.arr_id);
         } else {
           showToast('Error: ' + (data.error || 'unknown'), 'error');
-          if (btn) { btn.disabled = false; btn.textContent = '+ Add'; }
+          restoreAddBtn(btn);
         }
       })
       .catch(function(e) {
         showToast('Request failed: ' + e.message, 'error');
-        if (btn) { btn.disabled = false; btn.textContent = '+ Add'; }
+        restoreAddBtn(btn);
       });
   }
 
@@ -1570,12 +1568,27 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     }
   };
 
+  // A button that has kicked off a request says what it is doing and keeps its
+  // footprint. Collapsing the label to an ellipsis reads as broken, not busy.
+  function setBusy(btn, label) {
+    if (!btn._origHtml) btn._origHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.classList.add('is-busy');
+    btn.innerHTML = '<span class="spinner"></span>' + (label || 'Working\u2026');
+  }
+
+  function clearBusy(btn) {
+    btn.disabled = false;
+    btn.classList.remove('is-busy');
+    if (btn._origHtml) { btn.innerHTML = btn._origHtml; btn._origHtml = null; }
+  }
+  window.setBusy = setBusy;
+  window.clearBusy = clearBusy;
+
   // Re-check an entry against *arr: clears a link deleted there, and corrects
   // a path left stale by a restructure. Never touches files.
   window.verifyArrLink = async function(anilistId, btn) {
-    btn.disabled = true;
-    var orig = btn.textContent;
-    btn.textContent = '\u2026';
+    setBusy(btn, 'Verifying\u2026');
     try {
       var resp = await fetch('/api/arr/verify-link', {
         method: 'POST',
@@ -1593,8 +1606,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     } catch(e) {
       showToast('Verify failed: ' + e.message, 'error');
     } finally {
-      btn.disabled = false;
-      btn.textContent = orig;
+      clearBusy(btn);
     }
   };
 
@@ -1738,9 +1750,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
   // "The files are there, *arr just hasn't noticed." No preview: nothing on
   // disk changes, so there is nothing to approve.
   window.rescanInArr = async function(anilistId, btn) {
-    btn.disabled = true;
-    var orig = btn.textContent;
-    btn.textContent = '\u2026';
+    setBusy(btn, 'Rescanning\u2026');
     try {
       var resp = await fetch('/api/import/entry/rescan-arr', {
         method: 'POST',
@@ -1759,17 +1769,15 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     } catch (e) {
       showToast('Rescan failed: ' + e.message, 'error');
     } finally {
-      btn.disabled = false;
-      btn.textContent = orig;
+      clearBusy(btn);
     }
   };
 
   // Sonarr can see the files but has no idea what they are: our S02 is its
   // S01E13+. Translate the numbering and register it — no rename, no move.
   window.mapEpisodesInSonarr = async function(anilistId, btn) {
-    btn.disabled = true;
-    var orig = btn.textContent;
-    btn.textContent = '\u2026';
+    // The chain walk hits AniList and Sonarr, so this can run for a while.
+    setBusy(btn, 'Checking\u2026');
     try {
       var resp = await fetch('/api/import/entry/map-episodes', {
         method: 'POST',
@@ -1806,7 +1814,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
         sample + more + skipNote
       )) return;
 
-      btn.textContent = '\u2026';
+      setBusy(btn, 'Mapping\u2026');
       var resp2 = await fetch('/api/import/entry/map-episodes', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1821,17 +1829,14 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     } catch (e) {
       showToast('Mapping failed: ' + e.message, 'error');
     } finally {
-      btn.disabled = false;
-      btn.textContent = orig;
+      clearBusy(btn);
     }
   };
 
   // Files dropped into an entry's folder by hand: preview first, then file
   // them and tell *arr, so the episodes stop reading as missing.
   window.rescanEntryFolder = async function(anilistId, btn) {
-    btn.disabled = true;
-    var orig = btn.textContent;
-    btn.textContent = '\u2026';
+    setBusy(btn, 'Scanning\u2026');
     try {
       var resp = await fetch('/api/import/entry/preview', {
         method: 'POST',
@@ -1871,15 +1876,12 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     } catch (e) {
       showToast('Re-scan failed: ' + e.message, 'error');
     } finally {
-      btn.disabled = false;
-      btn.textContent = orig;
+      clearBusy(btn);
     }
   };
 
   window.reprocessEntry = async function(service, arrId, btn, dryRun) {
-    btn.disabled = true;
-    var orig = btn.textContent;
-    btn.textContent = '…';
+    setBusy(btn, dryRun ? 'Previewing\u2026' : 'Moving\u2026');
     var url = '/api/download/' + service + '/' + arrId + '/reprocess' + (dryRun ? '?dry_run=true' : '');
     try {
       var resp = await fetch(url, {method: 'POST'});
@@ -1901,8 +1903,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     } catch(e) {
       showToast('Reprocess error: ' + e.message, 'error');
     } finally {
-      btn.disabled = false;
-      btn.textContent = orig;
+      clearBusy(btn);
     }
   };
 

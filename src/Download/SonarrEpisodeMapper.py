@@ -32,7 +32,7 @@ from typing import Any
 
 from src.Clients.SonarrClient import SonarrClient
 from src.Database.Connection import DatabaseManager
-from src.Download.SeasonRangeMapper import rebuild_season_ranges
+from src.Download.SeasonRangeMapper import RebuildResult, rebuild_season_ranges
 from src.Scanner.LibraryRestructurer import _extract_episode_info
 from src.Utils.Config import AppConfig
 
@@ -126,32 +126,42 @@ class SonarrEpisodeMapper:
         if stored and not stale:
             return stored
 
-        rebuilt = 0
+        rebuild = RebuildResult()
         try:
-            rebuilt = await rebuild_season_ranges(
+            rebuild = await rebuild_season_ranges(
                 self._db, self._config, self._anilist, sonarr_id, anilist_id
             )
         except Exception as exc:
             logger.warning(
-                "Season range rebuild failed for sonarr_id=%d: %s", sonarr_id, exc
+                "Season range rebuild failed for sonarr_id=%d: %s",
+                sonarr_id,
+                exc,
+                exc_info=True,
             )
+            rebuild.reason = f"the rebuild errored: {exc}"
 
-        if rebuilt:
+        if rebuild.written:
             fresh = await self._stored_range(sonarr_id, anilist_id)
             if fresh and not (our_season > 1 and fresh[1] == 1 and fresh[2] is None):
                 return fresh
+            # It wrote mappings but none usable for *this* entry — say which,
+            # because "nothing happened" and "you were left out" differ.
+            rebuild.reason = (
+                f"the rebuild placed {rebuild.written} entr"
+                f"{'y' if rebuild.written == 1 else 'ies'} but not this one"
+            )
 
         if stale:
             raise MappingError(
                 f"This entry is season {our_season} of its series, but the only"
-                " Sonarr mapping we can work out covers the whole season — so we"
-                " can't tell which episode it starts at. Check that the AniList"
-                " entries in this series all have episode counts, then try again."
+                " Sonarr mapping we can work out covers the whole season, so we"
+                f" can't tell which episode it starts at — {rebuild.reason}."
+                f" [{rebuild.detail()}]"
             )
         raise MappingError(
             "We couldn't work out which Sonarr season and episodes this entry"
-            " covers. That usually means the series' AniList sequel chain or its"
-            " TVDB link is incomplete — re-link the entry to Sonarr and try again."
+            f" covers — {rebuild.reason or 'no mapping could be built'}."
+            f" [{rebuild.detail()}]"
         )
 
     async def _anilist_season_order(self, anilist_id: int) -> int:

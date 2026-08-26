@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.Download.SeasonRangeMapper import (
+    RebuildResult,
     assign_season_ranges,
     fetch_sonarr_seasons,
     persist_season_ranges,
@@ -134,3 +135,30 @@ async def test_specials_are_not_part_of_the_chronology() -> None:
 
     assert seasons == [1, 2]
     assert totals == {1: 24, 2: 13}
+
+
+# ---------------------------------------------------------------------------
+# Saying why a rebuild found nothing
+# ---------------------------------------------------------------------------
+
+
+def test_detail_names_every_input_it_had() -> None:
+    """The message has to be enough to diagnose from, without a log dive."""
+    r = RebuildResult(
+        tvdb_id=110811,
+        chain=[20994, 21364],
+        sonarr_seasons=[1],
+        season_totals={1: 24},
+        missing_counts=[21364],
+    )
+    detail = r.detail()
+    assert "tvdb=110811" in detail
+    assert "chain=2" in detail
+    assert "Sonarr seasons=[1]" in detail
+    assert "no episode count for [21364]" in detail
+
+
+def test_detail_is_readable_when_nothing_resolved() -> None:
+    detail = RebuildResult().detail()
+    assert "tvdb=none" in detail
+    assert "Sonarr seasons=none" in detail

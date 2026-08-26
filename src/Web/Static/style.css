@@ -3203,6 +3203,29 @@ details.advanced-section > summary::-webkit-details-marker { display: none; }
     background: rgba(61, 180, 242, 0.1);
 }
 
+/* Spinner — inherits the button's text colour, so it shows on any variant.
+   `.spinner` was used in markup long before it had a rule; this is that rule. */
+.spinner,
+.btn-spinner {
+    display: inline-block;
+    width: 0.85em;
+    height: 0.85em;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: -0.1em;
+    margin-right: 0.35em;
+    opacity: 0.85;
+}
+
+/* A button showing progress keeps its footprint — a label collapsing to an
+   ellipsis reads as broken rather than busy. */
+.btn.is-busy {
+    min-width: 7.5rem;
+    cursor: progress;
+}
+
 /* Spinner (inline) */
 .spinner-inline {
     display: inline-block;

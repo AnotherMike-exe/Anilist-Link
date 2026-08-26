@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.Download.SeasonRangeMapper import RebuildResult
 from src.Download.SonarrEpisodeMapper import (
     MappingError,
     SonarrEpisodeMapper,
@@ -22,7 +23,7 @@ def no_rebuild(monkeypatch):
     """Stub the self-heal so a test can assert on the stored mapping alone."""
 
     async def _none(db, config, anilist, sonarr_id, seed=None):
-        return 0
+        return RebuildResult(reason="nothing to go on")
 
     monkeypatch.setattr("src.Download.SonarrEpisodeMapper.rebuild_season_ranges", _none)
 
@@ -295,7 +296,7 @@ async def test_missing_mapping_is_rebuilt_before_giving_up(monkeypatch) -> None:
     async def fake_rebuild(db, config, anilist, sonarr_id, seed=None):
         calls.append((sonarr_id, seed))
         stored["row"] = {"season_number": 1, "episode_start": 13, "episode_end": 24}
-        return 1
+        return RebuildResult(written=1)
 
     monkeypatch.setattr(
         "src.Download.SonarrEpisodeMapper.rebuild_season_ranges", fake_rebuild

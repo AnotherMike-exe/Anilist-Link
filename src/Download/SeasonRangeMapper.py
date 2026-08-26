@@ -21,6 +21,7 @@ season sends files to the wrong show.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -166,18 +167,45 @@ async def persist_season_ranges(
     return len(assigned)
 
 
+@dataclass
+class RebuildResult:
+    """What a rebuild managed, and — when it managed nothing — why not."""
+
+    written: int = 0
+    reason: str = ""
+    tvdb_id: int = 0
+    chain: list[int] = field(default_factory=list)
+    sonarr_seasons: list[int] = field(default_factory=list)
+    season_totals: dict[int, int] = field(default_factory=dict)
+    missing_counts: list[int] = field(default_factory=list)
+
+    def detail(self) -> str:
+        """A one-line account of what was found, for the user and the log."""
+        parts = [f"tvdb={self.tvdb_id or 'none'}"]
+        parts.append(f"AniList chain={len(self.chain)} {self.chain or ''}".strip())
+        parts.append(
+            f"Sonarr seasons={self.sonarr_seasons or 'none'}"
+            + (f" totals={self.season_totals}" if self.season_totals else "")
+        )
+        if self.missing_counts:
+            parts.append(f"no episode count for {self.missing_counts}")
+        return "; ".join(parts)
+
+
 async def rebuild_season_ranges(
     db: Any,
     config: Any,
     anilist_client: Any,
     sonarr_id: int,
     seed_anilist_id: int | None = None,
-) -> int:
+) -> RebuildResult:
     """Recompute and store the season ranges for one Sonarr series.
 
     Walks the AniList sequel chain afresh, so it also picks up a cour that
-    aired after the series was linked.  Returns how many mappings were stored;
-    zero means the assignment could not be made and nothing was changed.
+    aired after the series was linked.  A result with ``written == 0`` carries
+    the reason and the values it got that far with — the failure is always in
+    the data, and naming which part is missing is the difference between a fix
+    and a shrug.
     """
     from src.Clients.SonarrClient import SonarrClient
     from src.Utils.NamingTranslator import (
@@ -186,8 +214,14 @@ async def rebuild_season_ranges(
         resolve_tvdb_via_prequel_chain,
     )
 
+    result = RebuildResult()
+
     if not config.sonarr.url or not config.sonarr.api_key:
-        return 0
+        result.reason = "Sonarr isn't configured"
+        return result
+    if anilist_client is None:
+        result.reason = "no AniList client available to walk the sequel chain"
+        return result
 
     # Any mapped entry seeds the walk — collect_series_chain follows sequel and
     # prequel edges both ways, so it does not have to be season one.
@@ -203,29 +237,61 @@ async def rebuild_season_ranges(
         seed = seed or int(row["anilist_id"])
         tvdb_id = int(row["tvdb_id"] or 0)
     if not seed:
-        return 0
+        result.reason = "nothing is linked to this Sonarr series"
+        return result
 
     if not tvdb_id:
         tvdb_id = await resolve_tvdb_id(seed, anilist_client) or 0
     if not tvdb_id:
         resolved, _ = await resolve_tvdb_via_prequel_chain(seed, anilist_client)
         tvdb_id = resolved or 0
+    result.tvdb_id = tvdb_id
     if not tvdb_id:
+        result.reason = "the AniList entry has no TVDB link, directly or via a prequel"
         logger.info(
-            "Can't rebuild season ranges for sonarr_id=%d: no TVDB id", sonarr_id
+            "Can't rebuild ranges for sonarr_id=%d: %s", sonarr_id, result.reason
         )
-        return 0
+        return result
 
-    chain = await collect_series_chain(seed, tvdb_id, anilist_client)
-    if not chain:
-        return 0
+    result.chain = await collect_series_chain(seed, tvdb_id, anilist_client)
+    if not result.chain:
+        result.reason = "the AniList sequel chain came back empty"
+        logger.info(
+            "Can't rebuild ranges for sonarr_id=%d: %s", sonarr_id, result.reason
+        )
+        return result
 
     sonarr = SonarrClient(url=config.sonarr.url, api_key=config.sonarr.api_key)
     try:
-        seasons, totals = await fetch_sonarr_seasons(sonarr, sonarr_id)
+        result.sonarr_seasons, result.season_totals = await fetch_sonarr_seasons(
+            sonarr, sonarr_id
+        )
     finally:
         await sonarr.close()
 
     counts = await load_episode_counts(db)
-    season_map, ranges = assign_season_ranges(chain, counts, seasons, totals)
-    return await persist_season_ranges(db, sonarr_id, season_map, ranges, chain)
+    result.missing_counts = [aid for aid in result.chain if not counts.get(aid)]
+
+    season_map, ranges = assign_season_ranges(
+        result.chain, counts, result.sonarr_seasons, result.season_totals
+    )
+    result.written = await persist_season_ranges(
+        db, sonarr_id, season_map, ranges, result.chain
+    )
+    if not result.written:
+        if not result.sonarr_seasons:
+            result.reason = "Sonarr reports no seasons for this series"
+        elif result.missing_counts:
+            result.reason = (
+                "the chain and Sonarr's seasons don't line up 1:1, and some"
+                " AniList entries have no episode count to lay them out with"
+            )
+        else:
+            result.reason = "no entry could be placed in a Sonarr season"
+        logger.info(
+            "Rebuild produced nothing for sonarr_id=%d: %s (%s)",
+            sonarr_id,
+            result.reason,
+            result.detail(),
+        )
+    return result
