@@ -19,6 +19,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from src.Download.ImportProcessor import ImportProcessor, count_media, has_media
+from src.Download.SonarrEpisodeMapper import MappingError, SonarrEpisodeMapper
 from src.Matching.Normalizer import extract_year_from_name
 from src.Scanner.LibraryScanner import LibraryScanner
 from src.Web.Routes.Helpers import create_title_matcher
@@ -200,6 +201,41 @@ async def import_entry_rescan_arr(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": arr["error"]}, status_code=502)
 
     return JSONResponse({"ok": True, "arr": arr})
+
+
+@router.post("/api/import/entry/map-episodes")
+async def import_entry_map_episodes(request: Request) -> JSONResponse:
+    """Associate an entry's on-disk files with Sonarr episodes.
+
+    Body: ``{anilist_id, dry_run}``.  For a split cour, where our files are
+    numbered by AniList (``S02E01``) and Sonarr numbers the same run as one
+    long season, so it lists the files with no season or episode at all.  With
+    ``dry_run`` the mapping is only reported; either way nothing on disk is
+    renamed or moved.
+    """
+    app_state = request.app.state
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    anilist_id = int(body.get("anilist_id", 0))
+    if not anilist_id:
+        return JSONResponse({"error": "anilist_id required"}, status_code=400)
+    dry_run = bool(body.get("dry_run", True))
+
+    mapper = SonarrEpisodeMapper(db=app_state.db, config=app_state.config)
+    try:
+        result = (
+            await mapper.plan(anilist_id) if dry_run else await mapper.apply(anilist_id)
+        )
+    except MappingError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.exception("Episode mapping failed for anilist_id=%d", anilist_id)
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+
+    return JSONResponse({"ok": True, "dry_run": dry_run, **result})
 
 
 # ---------------------------------------------------------------------------

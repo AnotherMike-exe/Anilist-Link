@@ -363,3 +363,58 @@ class SonarrClient(ServarrBaseClient):
         )
         resp.raise_for_status()
         return resp.json()
+
+    # ------------------------------------------------------------------
+    # Manual import (associate on-disk files with episodes)
+    # ------------------------------------------------------------------
+
+    async def get_manual_import_candidates(
+        self,
+        folder: str,
+        series_id: int | None = None,
+        season_number: int | None = None,
+        filter_existing_files: bool = True,
+    ) -> list[dict[str, Any]]:
+        """List files under *folder* that Sonarr could import.
+
+        This is what the "Manage Episodes" dialog shows: each entry carries the
+        quality/language/release-group Sonarr parsed out of the filename, plus
+        whichever episodes it managed to match — an empty ``episodes`` list is
+        the "unknown" row the UI displays when the numbering means nothing to
+        Sonarr.
+
+        With *filter_existing_files* left on, files Sonarr already tracks are
+        left out, so what comes back is exactly the set that still needs
+        associating.
+        """
+        params: dict[str, Any] = {
+            "folder": folder,
+            "filterExistingFiles": "true" if filter_existing_files else "false",
+        }
+        if series_id:
+            params["seriesId"] = series_id
+        if season_number is not None:
+            params["seasonNumber"] = season_number
+        resp = await self._http.get(
+            self._endpoint("manualimport"), params=params, timeout=120.0
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def manual_import(
+        self, files: list[dict[str, Any]], import_mode: str = "Auto"
+    ) -> dict[str, Any]:
+        """Associate already-on-disk files with specific episodes.
+
+        Sonarr only moves or renames a file it considers a *new* download, and
+        it decides that by asking whether the file already lives inside the
+        series folder. Every file handed to this method must therefore be under
+        the series path — the caller is responsible for that, and it is what
+        guarantees the files are registered where they already sit.
+        """
+        resp = await self._http.post(
+            self._endpoint("command"),
+            json={"name": "ManualImport", "importMode": import_mode, "files": files},
+        )
+        resp.raise_for_status()
+        return resp.json()

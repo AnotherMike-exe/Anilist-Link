@@ -300,6 +300,11 @@
           <button class="btn btn-secondary btn-xs"
                   onclick="rescanInArr({{ aid }}, this)"
                   title="Tell Sonarr/Radarr to look at this entry's folder again. Use when the files are on disk and correctly placed but *arr still lists them as missing. Nothing on disk is touched.">Rescan in *arr</button>
+          {% if entry.arr_service == 'sonarr' and entry.sonarr_id %}
+          <button class="btn btn-secondary btn-xs"
+                  onclick="mapEpisodesInSonarr({{ aid }}, this)"
+                  title="Tell Sonarr which episode each of this entry's files is. Use when Sonarr can see the files but lists them with no season or episode — a split cour we number as S02 but Sonarr counts as one long season. Shows you the mapping first; no file is renamed or moved.">Map Episodes</button>
+          {% endif %}
           <button class="btn btn-secondary btn-xs"
                   onclick="verifyArrLink({{ aid }}, this)"
                   title="Re-check this entry against Sonarr/Radarr: clears the link if it was deleted there, and corrects the stored path if the files have since been restructured. Never moves files.">Verify Link</button>
@@ -1748,6 +1753,68 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
         'success');
     } catch (e) {
       showToast('Rescan failed: ' + e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  };
+
+  // Sonarr can see the files but has no idea what they are: our S02 is its
+  // S01E13+. Translate the numbering and register it — no rename, no move.
+  window.mapEpisodesInSonarr = async function(anilistId, btn) {
+    btn.disabled = true;
+    var orig = btn.textContent;
+    btn.textContent = '\u2026';
+    try {
+      var resp = await fetch('/api/import/entry/map-episodes', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({anilist_id: anilistId, dry_run: true})
+      });
+      var d = await resp.json();
+      if (!d.ok) { showToast(d.error || 'Mapping failed', 'error'); return; }
+
+      var matched = d.matched || [];
+      var skipped = d.skipped || [];
+      if (!matched.length) {
+        var why = skipped.length
+          ? '\n\nSonarr listed ' + skipped.length + ' file(s) it could not use:\n  ' +
+            skipped.slice(0, 5).map(function(s) { return s.file + ' — ' + s.reason; }).join('\n  ')
+          : '\n\nSonarr reported no unmatched files in this series folder, so there is nothing left to map.';
+        showToast('Nothing to map.' + why, 'error');
+        return;
+      }
+
+      var sample = matched.slice(0, 5).map(function(m) {
+        return '  ' + m.file + '\n      \u2192 S' + String(m.sonarr_season).padStart(2, '0') +
+               'E' + String(m.sonarr_episode).padStart(2, '0') +
+               (m.episode_title ? '  ' + m.episode_title : '');
+      }).join('\n');
+      var more = matched.length > 5 ? '\n  \u2026and ' + (matched.length - 5) + ' more' : '';
+      var skipNote = skipped.length ? '\n\nSkipping ' + skipped.length + ' file(s): ' +
+        skipped.slice(0, 3).map(function(s) { return s.file + ' (' + s.reason + ')'; }).join(', ') : '';
+
+      if (!confirm(
+        'Register ' + matched.length + ' file' + (matched.length === 1 ? '' : 's') +
+        ' with Sonarr as ' + (d.series_title || 'this series') + ' episodes?\n\n' +
+        'Nothing is renamed or moved \u2014 the files stay exactly where they are.\n\n' +
+        sample + more + skipNote
+      )) return;
+
+      btn.textContent = '\u2026';
+      var resp2 = await fetch('/api/import/entry/map-episodes', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({anilist_id: anilistId, dry_run: false})
+      });
+      var d2 = await resp2.json();
+      if (!d2.ok) { showToast(d2.error || 'Mapping failed', 'error'); return; }
+      showToast(
+        'Sent ' + d2.imported + ' file' + (d2.imported === 1 ? '' : 's') +
+        ' to Sonarr. Give it a moment, then check whether the episodes still read as missing.',
+        'success');
+    } catch (e) {
+      showToast('Mapping failed: ' + e.message, 'error');
     } finally {
       btn.disabled = false;
       btn.textContent = orig;
