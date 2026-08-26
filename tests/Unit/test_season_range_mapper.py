@@ -50,18 +50,6 @@ def test_ranges_restart_at_one_in_the_next_season() -> None:
     assert ranges == {1: (1, 12), 2: (13, 24), 3: (1, 13)}
 
 
-def test_unknown_episode_counts_assign_nothing() -> None:
-    """A guessed season sends files to the wrong show — refuse instead."""
-    season_map, ranges = assign_season_ranges(
-        chain=[1, 2, 3],
-        episode_counts={1: 12, 2: None, 3: 12},
-        sonarr_seasons=[1, 2],
-        sonarr_season_totals={1: 24, 2: 13},
-    )
-    assert season_map == {1: None, 2: None, 3: None}
-    assert ranges == {}
-
-
 def test_no_sonarr_seasons_assigns_nothing() -> None:
     season_map, _ = assign_season_ranges([1, 2], {1: 12, 2: 12}, [], {})
     assert season_map == {1: None, 2: None}
@@ -162,3 +150,55 @@ def test_detail_is_readable_when_nothing_resolved() -> None:
     detail = RebuildResult().detail()
     assert "tvdb=none" in detail
     assert "Sonarr seasons=none" in detail
+
+
+# ---------------------------------------------------------------------------
+# An unaired sequel in the chain
+# ---------------------------------------------------------------------------
+
+
+def test_unaired_sequel_does_not_block_the_entries_before_it() -> None:
+    """GATE: two aired cours in one Sonarr season, plus an announced third.
+
+    The third has no episode count on AniList yet, and Sonarr has no season for
+    it. That must not cost the two entries that place perfectly well.
+    """
+    season_map, ranges = assign_season_ranges(
+        chain=[20994, 21364, 195496],
+        episode_counts={20994: 12, 21364: 12, 195496: None},
+        sonarr_seasons=[1],
+        sonarr_season_totals={1: 24},
+    )
+    assert season_map == {20994: 1, 21364: 1, 195496: None}
+    assert ranges == {20994: (1, 12), 21364: (13, 24)}
+
+
+def test_an_unknown_count_stops_everything_after_it() -> None:
+    """The unknown entry's length is what the next one's start is measured
+    from, so past it we are guessing — and a guess files the wrong episodes."""
+    season_map, ranges = assign_season_ranges(
+        chain=[1, 2, 3],
+        episode_counts={1: 12, 2: None, 3: 12},
+        sonarr_seasons=[1, 2],
+        sonarr_season_totals={1: 24, 2: 24},
+    )
+    assert season_map[1] == 1
+    assert ranges[1] == (1, 12)
+    # Entry 2 still gets placed — its start is known, only its end is not.
+    assert season_map[2] == 1
+    assert ranges[2] == (13, None)
+    # Entry 3 is past the point where the offset is knowable.
+    assert season_map[3] is None
+    assert 3 not in ranges
+
+
+def test_no_count_on_the_first_entry_still_assigns_nothing() -> None:
+    """Without a length for entry one there is no origin to measure from."""
+    season_map, ranges = assign_season_ranges(
+        chain=[1, 2],
+        episode_counts={1: None, 2: 12},
+        sonarr_seasons=[1],
+        sonarr_season_totals={1: 24},
+    )
+    assert season_map == {1: None, 2: None}
+    assert ranges == {}

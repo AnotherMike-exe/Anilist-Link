@@ -53,7 +53,7 @@ def assign_season_ranges(
             episode_ranges[aid] = (1, None)
         return season_map, episode_ranges
 
-    if sonarr_seasons and all(episode_counts.get(aid) for aid in chain):
+    if sonarr_seasons and episode_counts.get(chain[0] if chain else 0):
         # Lay the chain end to end and see which season each entry falls in.
         sonarr_ranges: list[tuple[int, int, int]] = []  # (start, end, season)
         cum = 1
@@ -64,7 +64,15 @@ def assign_season_ranges(
                 cum += total
 
         anilist_start = 1
+        # An entry with no episode count — an announced sequel that hasn't aired
+        # — can still be placed itself, but nothing after it can: its length is
+        # what the next entry's start is measured from. So place up to and
+        # including it, then stop rather than guess.
+        counts_ran_out = False
         for aid in chain:
+            if counts_ran_out:
+                season_map[aid] = None
+                continue
             eps = episode_counts.get(aid) or 0
             assigned: int | None = None
             for s_start, s_end, sn in sonarr_ranges:
@@ -78,6 +86,9 @@ def assign_season_ranges(
                     )
                     break
             season_map[aid] = assigned
+            if not eps:
+                counts_ran_out = True
+                continue
             anilist_start += eps
         return season_map, episode_ranges
 
@@ -281,13 +292,17 @@ async def rebuild_season_ranges(
     if not result.written:
         if not result.sonarr_seasons:
             result.reason = "Sonarr reports no seasons for this series"
-        elif result.missing_counts:
+        elif result.chain and result.chain[0] in result.missing_counts:
             result.reason = (
-                "the chain and Sonarr's seasons don't line up 1:1, and some"
-                " AniList entries have no episode count to lay them out with"
+                f"the first entry in the chain (AniList {result.chain[0]}) has no"
+                " episode count, so there is nothing to measure the rest from"
             )
         else:
-            result.reason = "no entry could be placed in a Sonarr season"
+            result.reason = (
+                "no entry could be placed in a Sonarr season — the chain runs"
+                f" {sum(counts.get(a) or 0 for a in result.chain)} episodes but"
+                f" Sonarr's seasons hold {sum(result.season_totals.values())}"
+            )
         logger.info(
             "Rebuild produced nothing for sonarr_id=%d: %s (%s)",
             sonarr_id,

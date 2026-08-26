@@ -145,10 +145,14 @@ class SonarrEpisodeMapper:
             if fresh and not (our_season > 1 and fresh[1] == 1 and fresh[2] is None):
                 return fresh
             # It wrote mappings but none usable for *this* entry — say which,
-            # because "nothing happened" and "you were left out" differ.
+            # because "nothing happened" and "you were left out" differ. The
+            # usual cause is a sequel Sonarr has no season for yet.
             rebuild.reason = (
                 f"the rebuild placed {rebuild.written} entr"
-                f"{'y' if rebuild.written == 1 else 'ies'} but not this one"
+                f"{'y' if rebuild.written == 1 else 'ies'} but not this one,"
+                " which normally means Sonarr's season list doesn't reach it yet"
+                " (an announced or still-airing sequel) — refresh the series in"
+                " Sonarr once TVDB lists it"
             )
 
         if stale:
