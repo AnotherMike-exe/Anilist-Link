@@ -17,6 +17,16 @@ from src.Utils.Config import AppConfig, SonarrConfig
 SERIES_PATH = "/tv/GATE"
 
 
+@pytest.fixture
+def no_rebuild(monkeypatch):
+    """Stub the self-heal so a test can assert on the stored mapping alone."""
+
+    async def _none(db, config, anilist, sonarr_id, seed=None):
+        return 0
+
+    monkeypatch.setattr("src.Download.SonarrEpisodeMapper.rebuild_season_ranges", _none)
+
+
 def _config() -> AppConfig:
     return AppConfig(sonarr=SonarrConfig(url="http://s:8989", api_key="k"))
 
@@ -277,9 +287,47 @@ async def test_unlinked_entry_is_refused() -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_season_mapping_points_at_the_fix() -> None:
+async def test_missing_mapping_is_rebuilt_before_giving_up(monkeypatch) -> None:
+    """No stored range is a job to do, not a chore to hand back to the user."""
+    calls: list[tuple] = []
+    stored: dict[str, Any] = {"row": None}
+
+    async def fake_rebuild(db, config, anilist, sonarr_id, seed=None):
+        calls.append((sonarr_id, seed))
+        stored["row"] = {"season_number": 1, "episode_start": 13, "episode_end": 24}
+        return 1
+
+    monkeypatch.setattr(
+        "src.Download.SonarrEpisodeMapper.rebuild_season_ranges", fake_rebuild
+    )
+
+    db = MagicMock()
+
+    async def fetch_one(query: str, params: tuple = ()) -> dict[str, Any] | None:
+        if "anilist_sonarr_season_mapping" in query:
+            return stored["row"]
+        if "anilist_sonarr_mapping" in query:
+            return {"sonarr_id": 272}
+        if "series_group_entries" in query:
+            return {"season_order": 2}
+        return None
+
+    db.fetch_one = fetch_one
+    mapper = SonarrEpisodeMapper(
+        db=db,
+        config=_config(),
+        sonarr=_sonarr([_candidate("GATE - S02E01.mkv")], _episodes(1, 24)),
+    )
+    plan = await mapper.plan(21364)
+
+    assert calls == [(272, 21364)]
+    assert plan["matched"][0]["sonarr_episode"] == 13
+
+
+@pytest.mark.asyncio
+async def test_unrebuildable_mapping_explains_itself(no_rebuild) -> None:
     mapper = SonarrEpisodeMapper(db=_db(season_row=None), config=_config())
-    with pytest.raises(MappingError, match="Re-sync Seasons"):
+    with pytest.raises(MappingError, match="couldn't work out"):
         await mapper.plan(21364)
 
 

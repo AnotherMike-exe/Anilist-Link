@@ -17,6 +17,11 @@ where it already sits.  Sonarr only moves a file it considers a new download,
 and it decides that by whether the file is already inside the series folder —
 so every file is checked against that path before being sent, and anything
 outside is refused rather than quietly relocated.
+
+The mapping an entry needs may not exist yet — a series linked before episode
+ranges were recorded has only a whole-season row — so it is rebuilt on demand
+from the same AniList chain walk that linking runs, rather than asked of the
+user.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from typing import Any
 
 from src.Clients.SonarrClient import SonarrClient
 from src.Database.Connection import DatabaseManager
+from src.Download.SeasonRangeMapper import rebuild_season_ranges
 from src.Scanner.LibraryRestructurer import _extract_episode_info
 from src.Utils.Config import AppConfig
 
@@ -57,11 +63,16 @@ class SonarrEpisodeMapper:
     """Translates AniList episode numbering into Sonarr's, then registers it."""
 
     def __init__(
-        self, db: DatabaseManager, config: AppConfig, sonarr: SonarrClient | None = None
+        self,
+        db: DatabaseManager,
+        config: AppConfig,
+        sonarr: SonarrClient | None = None,
+        anilist_client: Any = None,
     ) -> None:
         self._db = db
         self._config = config
         self._sonarr = sonarr
+        self._anilist = anilist_client
 
     # ------------------------------------------------------------------
     # Database lookups
@@ -77,10 +88,10 @@ class SonarrEpisodeMapper:
             raise MappingError("This entry isn't linked to a Sonarr series.")
         return int(row["sonarr_id"])
 
-    async def _episode_range(
+    async def _stored_range(
         self, sonarr_id: int, anilist_id: int
-    ) -> tuple[int, int, int | None]:
-        """Return (sonarr_season, episode_start, episode_end) for this entry."""
+    ) -> tuple[int, int, int | None] | None:
+        """The stored (sonarr_season, episode_start, episode_end), if any."""
         row = await self._db.fetch_one(
             "SELECT season_number, episode_start, episode_end"
             " FROM anilist_sonarr_season_mapping"
@@ -88,16 +99,59 @@ class SonarrEpisodeMapper:
             " ORDER BY season_number, episode_start LIMIT 1",
             (sonarr_id, anilist_id),
         )
-        if row:
-            end = row["episode_end"]
-            return (
-                int(row["season_number"]),
-                int(row["episode_start"] or 1),
-                int(end) if end is not None else None,
+        if not row:
+            return None
+        end = row["episode_end"]
+        return (
+            int(row["season_number"]),
+            int(row["episode_start"] or 1),
+            int(end) if end is not None else None,
+        )
+
+    async def _episode_range(
+        self, sonarr_id: int, anilist_id: int, our_season: int
+    ) -> tuple[int, int, int | None]:
+        """Return (sonarr_season, episode_start, episode_end) for this entry.
+
+        A missing mapping, or a sequel still holding a whole-season row from
+        before episode ranges existed, is rebuilt here rather than handed back
+        to the user as a chore — the chain walk that produces it is the same one
+        linking the series ran, and it needs no input.
+        """
+        stored = await self._stored_range(sonarr_id, anilist_id)
+        # A sequel whose range still starts at episode 1 with no end is a
+        # whole-season row: offsetting by it would file cour two over cour one.
+        stale = bool(stored and our_season > 1 and stored[1] == 1 and stored[2] is None)
+
+        if stored and not stale:
+            return stored
+
+        rebuilt = 0
+        try:
+            rebuilt = await rebuild_season_ranges(
+                self._db, self._config, self._anilist, sonarr_id, anilist_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "Season range rebuild failed for sonarr_id=%d: %s", sonarr_id, exc
+            )
+
+        if rebuilt:
+            fresh = await self._stored_range(sonarr_id, anilist_id)
+            if fresh and not (our_season > 1 and fresh[1] == 1 and fresh[2] is None):
+                return fresh
+
+        if stale:
+            raise MappingError(
+                f"This entry is season {our_season} of its series, but the only"
+                " Sonarr mapping we can work out covers the whole season — so we"
+                " can't tell which episode it starts at. Check that the AniList"
+                " entries in this series all have episode counts, then try again."
             )
         raise MappingError(
-            "No Sonarr season mapping is recorded for this entry. Use"
-            ' "Re-sync Seasons" on the Sonarr link first, then try again.'
+            "We couldn't work out which Sonarr season and episodes this entry"
+            " covers. That usually means the series' AniList sequel chain or its"
+            " TVDB link is incomplete — re-link the entry to Sonarr and try again."
         )
 
     async def _anilist_season_order(self, anilist_id: int) -> int:
@@ -122,19 +176,10 @@ class SonarrEpisodeMapper:
             raise MappingError("Sonarr isn't configured.")
 
         sonarr_id = await self._sonarr_id(anilist_id)
-        season, ep_start, ep_end = await self._episode_range(sonarr_id, anilist_id)
         our_season = await self._anilist_season_order(anilist_id)
-
-        # A sequel entry whose range still starts at episode 1 with no end is a
-        # whole-season row left over from before the ranges existed. Offsetting
-        # by it would file the second cour over the first one's episodes.
-        if our_season > 1 and ep_start == 1 and ep_end is None:
-            raise MappingError(
-                f"This entry is season {our_season} of its series but its Sonarr"
-                " mapping still covers the whole season, so we can't tell where"
-                ' its episodes start. Use "Re-sync Seasons" on the Sonarr link'
-                " first, then try again."
-            )
+        season, ep_start, ep_end = await self._episode_range(
+            sonarr_id, anilist_id, our_season
+        )
 
         client = self._sonarr or SonarrClient(
             url=self._config.sonarr.url, api_key=self._config.sonarr.api_key

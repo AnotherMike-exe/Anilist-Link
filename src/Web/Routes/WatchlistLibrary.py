@@ -13,6 +13,10 @@ from starlette.responses import StreamingResponse
 from src.Clients.RadarrClient import RadarrClient
 from src.Clients.SonarrClient import SonarrClient
 from src.Download.MappingResolver import MappingResolver
+from src.Download.SeasonRangeMapper import (
+    assign_season_ranges,
+    persist_season_ranges,
+)
 from src.Scanner.SeriesGroupBuilder import SeriesGroupBuilder
 from src.Utils.NamingTranslator import (
     GET_FULL_MEDIA_QUERY,
@@ -443,69 +447,14 @@ async def _auto_link_sonarr_siblings(
                 "Could not fetch Sonarr seasons for series_id=%d: %s", sonarr_id, exc
             )
 
-        # Season assignment: prefer 1:1 when counts match, else try cumulative
-        season_map: dict[int, int | None] = {}
-        # anilist_id -> (episode_start, episode_end) within its Sonarr season.
-        # Only populated by the cumulative branch; a 1:1 entry owns its whole
-        # season and is stored as (1, None).
-        episode_ranges: dict[int, tuple[int, int | None]] = {}
-        if sonarr_seasons and len(chain) == len(sonarr_seasons):
-            # Perfect 1:1 chronological assignment
-            for idx, aid in enumerate(chain):
-                season_map[aid] = sonarr_seasons[idx]
-            logger.info(
-                "Season assignment (1:1) for tvdb_id=%d: %s",
-                tvdb_id,
-                {aid: season_map[aid] for aid in chain},
-            )
-        elif sonarr_seasons and all(episode_counts.get(aid) for aid in chain):
-            # Cumulative episode-range assignment: map each AniList entry to
-            # whichever Sonarr season contains its starting episode.
-            # Multiple AniList parts can map to the same Sonarr season.
-            sonarr_ranges: list[tuple[int, int, int]] = []  # (start, end, season_num)
-            cum = 1
-            for sn in sonarr_seasons:
-                total = sonarr_season_totals.get(sn, 0)
-                if total > 0:
-                    sonarr_ranges.append((cum, cum + total - 1, sn))
-                    cum += total
-
-            anilist_start = 1
-            for aid in chain:
-                eps = episode_counts.get(aid) or 0
-                assigned: int | None = None
-                for s_start, s_end, sn in sonarr_ranges:
-                    if anilist_start <= s_end:
-                        assigned = sn
-                        # Convert the absolute chain position into the season's
-                        # own numbering — that is what Sonarr labels episodes
-                        # with, and what the post-processor matches against.
-                        rel_start = anilist_start - s_start + 1
-                        episode_ranges[aid] = (
-                            max(1, rel_start),
-                            max(1, rel_start) + eps - 1 if eps else None,
-                        )
-                        break
-                season_map[aid] = assigned
-                anilist_start += eps
-
-            logger.info(
-                "Season assignment (cumulative) for tvdb_id=%d: %s",
-                tvdb_id,
-                {aid: (season_map[aid], episode_ranges.get(aid)) for aid in chain},
-            )
-        else:
-            for aid in chain:
-                season_map[aid] = None
-            if sonarr_seasons:
-                logger.debug(
-                    "Season assignment skipped: chain_len=%d sonarr_seasons=%d"
-                    " known_eps=%d for tvdb_id=%d",
-                    len(chain),
-                    len(sonarr_seasons),
-                    sum(1 for aid in chain if episode_counts.get(aid)),
-                    tvdb_id,
-                )
+        season_map, episode_ranges = assign_season_ranges(
+            chain, episode_counts, sonarr_seasons, sonarr_season_totals
+        )
+        logger.info(
+            "Season assignment for tvdb_id=%d: %s",
+            tvdb_id,
+            {aid: (season_map.get(aid), episode_ranges.get(aid)) for aid in chain},
+        )
 
         # Update root entry's sonarr_season if we now have an assignment
         root_season = season_map.get(root_anilist_id)
@@ -576,29 +525,9 @@ async def _auto_link_sonarr_siblings(
                 root_anilist_id,
             )
 
-        # Populate anilist_sonarr_season_mapping for the post-processor.
-        # Use INSERT OR REPLACE so re-adding a series always corrects stale mappings.
-        mapped_count = 0
-        # Replace this series' ranges wholesale: a re-run may split a season
-        # that was previously stored as one whole-season row, and leaving the
-        # old row behind would keep matching every episode.
-        if any(season_map.get(aid) is not None for aid in chain):
-            await db.execute(
-                "DELETE FROM anilist_sonarr_season_mapping WHERE sonarr_id=?",
-                (sonarr_id,),
-            )
-        for aid in chain:
-            s_num = season_map.get(aid)
-            if s_num is not None:
-                ep_start, ep_end = episode_ranges.get(aid, (1, None))
-                await db.execute(
-                    """INSERT OR REPLACE INTO anilist_sonarr_season_mapping
-                       (sonarr_id, season_number, anilist_id,
-                        episode_start, episode_end)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (sonarr_id, s_num, aid, ep_start, ep_end),
-                )
-                mapped_count += 1
+        mapped_count = await persist_season_ranges(
+            db, sonarr_id, season_map, episode_ranges, chain
+        )
         if mapped_count:
             logger.info(
                 "Populated %d season mappings for sonarr_id=%d",
@@ -2022,6 +1951,7 @@ async def backfill_sonarr_siblings(request: Request) -> JSONResponse:
 
     linked: list[dict] = []
     skipped_no_tvdb: list[int] = []
+    ranges_written = 0
 
     for sonarr_id, members in groups.items():
         # Use the first member's anilist_id and tvdb_id as chain root
@@ -2044,34 +1974,16 @@ async def backfill_sonarr_siblings(request: Request) -> JSONResponse:
             )
             continue
 
-        # Season assignment: 1:1 when counts match, else cumulative episode-range
         sonarr_seasons = sonarr_seasons_map.get(sonarr_id, [])
         sonarr_season_totals = sonarr_season_totals_map.get(sonarr_id, {})
-        season_map: dict[int, int | None] = {}
-        if sonarr_seasons and len(chain) == len(sonarr_seasons):
-            for idx, aid in enumerate(chain):
-                season_map[aid] = sonarr_seasons[idx]
-        elif sonarr_seasons and all(episode_counts.get(aid) for aid in chain):
-            sonarr_ranges: list[tuple[int, int, int]] = []
-            cum = 1
-            for sn in sonarr_seasons:
-                total = sonarr_season_totals.get(sn, 0)
-                if total > 0:
-                    sonarr_ranges.append((cum, cum + total - 1, sn))
-                    cum += total
-            anilist_start = 1
-            for aid in chain:
-                eps = episode_counts.get(aid) or 0
-                assigned: int | None = None
-                for s_start, s_end, sn in sonarr_ranges:
-                    if anilist_start <= s_end:
-                        assigned = sn
-                        break
-                season_map[aid] = assigned
-                anilist_start += eps
-        else:
-            for aid in chain:
-                season_map[aid] = None
+        season_map, episode_ranges = assign_season_ranges(
+            chain, episode_counts, sonarr_seasons, sonarr_season_totals
+        )
+        # The backfill is also where a series linked before episode ranges
+        # existed gets them, so store the ranges too — not just the season.
+        ranges_written += await persist_season_ranges(
+            db, sonarr_id, season_map, episode_ranges, chain
+        )
 
         # Update season on already-mapped entries that lack it
         for aid in chain:
@@ -2150,6 +2062,7 @@ async def backfill_sonarr_siblings(request: Request) -> JSONResponse:
             "total_season_updates": len(
                 [x for x in linked if x["action"] == "season_updated"]
             ),
+            "total_ranges_written": ranges_written,
             "skipped_no_tvdb": skipped_no_tvdb,
         }
     )

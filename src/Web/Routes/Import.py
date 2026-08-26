@@ -224,7 +224,11 @@ async def import_entry_map_episodes(request: Request) -> JSONResponse:
         return JSONResponse({"error": "anilist_id required"}, status_code=400)
     dry_run = bool(body.get("dry_run", True))
 
-    mapper = SonarrEpisodeMapper(db=app_state.db, config=app_state.config)
+    mapper = SonarrEpisodeMapper(
+        db=app_state.db,
+        config=app_state.config,
+        anilist_client=app_state.anilist_client,
+    )
     try:
         result = (
             await mapper.plan(anilist_id) if dry_run else await mapper.apply(anilist_id)

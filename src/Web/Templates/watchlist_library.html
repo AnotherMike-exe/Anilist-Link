@@ -96,6 +96,10 @@
     <button class="btn btn-primary" id="refreshBtn" onclick="refreshWatchlist()">
       Refresh from AniList
     </button>
+    {% if arr_enabled %}
+    <button class="btn btn-secondary" id="resyncSeasonsBtn" onclick="resyncSonarrSeasons()"
+            title="Re-walk every linked series' AniList sequel chain and re-record which Sonarr season and episode range each entry covers. Links siblings that were missed. Changes nothing on disk or in Sonarr.">↺ Re-sync Seasons</button>
+    {% endif %}
     <div class="view-toggle">
       <button class="view-btn active" id="tableViewBtn" onclick="setWatchlistView('table')" title="Table view">☰</button>
       <button class="view-btn" id="gridViewBtn" onclick="setWatchlistView('grid')" title="Grid view">⊞</button>
@@ -1417,9 +1421,10 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
         btn.disabled = false;
         btn.innerHTML = '↺ Re-sync Seasons';
         if (data.ok) {
-          var msg = 'Season sync done: ' + data.total_season_updates + ' updated, ' + data.total_linked + ' new links.';
+          var msg = 'Season sync done: ' + data.total_season_updates + ' updated, ' +
+                    data.total_linked + ' new links, ' + (data.total_ranges_written || 0) + ' episode ranges.';
           showToast(msg, 'success');
-          if (data.total_season_updates > 0 || data.total_linked > 0) {
+          if (data.total_season_updates > 0 || data.total_linked > 0 || data.total_ranges_written > 0) {
             setTimeout(function() { window.location.reload(); }, 1800);
           }
         } else {
