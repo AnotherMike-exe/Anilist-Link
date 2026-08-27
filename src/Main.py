@@ -313,7 +313,7 @@ async def main() -> None:
     )
 
     # Create scheduler
-    scheduler = JobScheduler(config.scheduler)
+    scheduler = JobScheduler(config.scheduler, timezone=config.timezone)
     # Build FastAPI app (stores references on app.state)
     app = create_app(config, db, anilist_client, scheduler)
 

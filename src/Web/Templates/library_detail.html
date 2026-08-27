@@ -164,6 +164,10 @@
                 {% if _in_jellyfin and item.anilist_id %}
                 <button class="btn btn-sm btn-secondary" onclick="syncToJellyfin({{ item.id }}, this)">Sync to Jellyfin</button>
                 {% endif %}
+                {% if item.anilist_id %}
+                <button class="btn btn-sm btn-secondary" onclick="openSmartMove({{ item.id }}, this)"
+                        title="Move this folder into its standardized library location">Fix Location</button>
+                {% endif %}
             </div>
         </div>
     </div>
@@ -227,6 +231,10 @@
         {% if _in_jellyfin_list and item.anilist_id %}
         <button class="btn btn-sm btn-secondary" onclick="syncToJellyfin({{ item.id }}, this)">Sync Jellyfin</button>
         {% endif %}
+        {% if item.anilist_id %}
+        <button class="btn btn-sm btn-secondary" onclick="openSmartMove({{ item.id }}, this)"
+                title="Move this folder into its standardized library location">Fix Location</button>
+        {% endif %}
         <button class="btn btn-sm btn-primary" onclick="openEditModal(this.closest('.library-list-row'))">
             {{ "Edit" if item.anilist_id else "Match" }}
         </button>
@@ -257,6 +265,24 @@
             <div id="editRemoveSection" style="display:none; margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem;">
                 <button class="btn btn-danger btn-sm" onclick="removeMatch()">Remove Match</button>
             </div>
+        </div>
+    </div>
+</div>
+
+<!-- Smart Move Modal -->
+<div class="modal" id="smartMoveModal" style="display:none">
+    <div class="modal-backdrop" onclick="closeSmartMove()"></div>
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Fix Location</h3>
+            <button class="modal-close" onclick="closeSmartMove()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="smartMoveBody"><p class="text-muted">Analyzing…</p></div>
+        </div>
+        <div class="modal-footer" style="display:flex;justify-content:flex-end;gap:0.5rem;padding:0.75rem 1rem;border-top:1px solid var(--border);">
+            <button class="btn btn-sm btn-secondary" onclick="closeSmartMove()">Cancel</button>
+            <button class="btn btn-sm btn-primary" id="smartMoveConfirmBtn" onclick="confirmSmartMove()" disabled>Move</button>
         </div>
     </div>
 </div>
@@ -532,6 +558,93 @@ async function syncToPlex(itemId, btn) {
         btn.textContent = origText;
         btn.disabled = false;
     }
+}
+
+// ── Smart Move (Fix Location) ──
+var _smartMove = { itemId: null };
+
+function smEsc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function openSmartMove(itemId, btn) {
+    _smartMove.itemId = itemId;
+    var body = document.getElementById('smartMoveBody');
+    var confirmBtn = document.getElementById('smartMoveConfirmBtn');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Move';
+    body.innerHTML = '<p class="text-muted">Analyzing…</p>';
+    document.getElementById('smartMoveModal').style.display = 'block';
+    fetch('/api/smart-move/preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ library_item_id: itemId })
+    }).then(function(r) { return r.json(); })
+      .then(renderSmartMovePreview)
+      .catch(function() {
+          body.innerHTML = '<p style="color:#c62828;">Preview failed.</p>';
+      });
+}
+
+function renderSmartMovePreview(data) {
+    var body = document.getElementById('smartMoveBody');
+    var confirmBtn = document.getElementById('smartMoveConfirmBtn');
+    if (data.error) {
+        body.innerHTML = '<p style="color:#c62828;">' + smEsc(data.error) + '</p>';
+        return;
+    }
+    if (!data.needs_move) {
+        body.innerHTML = '<p>✓ Already in the correct location.</p>' +
+            '<p class="text-muted" style="font-size:0.82rem;word-break:break-all;">' +
+            smEsc(data.current_folder) + '</p>';
+        return;
+    }
+    var extra = data.support_file_count
+        ? ' and clean up ' + data.support_file_count + ' leftover metadata file(s)'
+        : '';
+    var html = '<p style="margin-bottom:0.6rem;">This will move <strong>' +
+        data.file_count + '</strong> file(s)' + extra + ':</p>' +
+        '<div style="font-size:0.82rem;">' +
+        '<div style="margin-bottom:0.4rem;"><span class="text-muted">From:</span><br>' +
+        '<span style="word-break:break-all;">' + smEsc(data.current_folder) + '</span></div>' +
+        '<div><span class="text-muted">To:</span><br>' +
+        '<span style="word-break:break-all;color:var(--accent,#4a90d9);">' +
+        smEsc(data.target_folder) + '</span></div></div>';
+    body.innerHTML = html;
+    confirmBtn.disabled = false;
+}
+
+function closeSmartMove() {
+    document.getElementById('smartMoveModal').style.display = 'none';
+    _smartMove.itemId = null;
+}
+
+function confirmSmartMove() {
+    if (!_smartMove.itemId) return;
+    var confirmBtn = document.getElementById('smartMoveConfirmBtn');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Moving…';
+    fetch('/api/smart-move/execute', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ library_item_id: _smartMove.itemId })
+    }).then(function(r) { return r.json(); })
+      .then(function(data) {
+          if (data.ok) {
+              document.getElementById('smartMoveBody').innerHTML =
+                  '<p>✓ Moved ' + (data.moved || 0) + ' file(s).</p>';
+              setTimeout(function() { window.location.reload(); }, 1200);
+          } else {
+              alert('Move failed: ' + (data.error || 'unknown'));
+              confirmBtn.disabled = false;
+              confirmBtn.textContent = 'Move';
+          }
+      }).catch(function() {
+          alert('Move failed.');
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = 'Move';
+      });
 }
 
 async function reindexLibrary() {

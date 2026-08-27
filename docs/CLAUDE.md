@@ -209,7 +209,9 @@ Move to `/docs` when:
 - **Metadata Scanner**: Orchestrates scan → match → cache → apply pipeline across Plex libraries [implemented]
 - **Jellyfin Metadata Scanner**: Parallel scanner for Jellyfin libraries [implemented]
 - **Series Group Builder**: BFS traversal of AniList SEQUEL/PREQUEL graph to build series groups [implemented]
-- **Library Restructurer**: Analyzes and reorganizes anime files into Structure A [implemented]
+- **Library Restructurer**: Analyzes and reorganizes anime files into Structure A; nests lone franchise entries (e.g. a movie) under their series-group ROOT folder, resolving the root via the series group or a PREQUEL-chain walk [implemented]
+- **Smart Move (Fix Location)**: Per-item filesystem relocation for a library item not tracked in Sonarr/Radarr — one-item preview → execute via the restructurer, reusing franchise-root nesting, NFO writing, and orphan cleanup (`src/Web/Routes/SmartMove.py`) [implemented]
+- **Arr Post-Processor franchise nesting**: Sonarr/Radarr "Move to Library" nests movies under the franchise root (series group or PREQUEL walk), disambiguates a movie folder from a same-named TV season, backfills the root's year, writes the group NFO, and prunes the orphaned source folder [implemented]
 - **Watch Syncer**: Crunchyroll→AniList watch sync with status transitions (PLANNING → CURRENT → COMPLETED) [implemented]
 - **Crunchyroll Preview Runner**: Preview/approve/undo pipeline for CR sync [implemented]
 - **Download Manager**: Orchestrates AniList→Sonarr/Radarr add requests [implemented]
@@ -431,6 +433,10 @@ Current tables (29):
   - `GET /manual-grab` - Manual release grab
   - `GET /watchlist` - AniList watchlist browser
   - `POST /api/watchlist/rate` - Submit a score for a watchlist entry (AniList + local cache)
+  - `POST /api/library/add-to-arr` - Add an AniList entry to Sonarr/Radarr; returns `needs_disambiguation` (with candidates) when TVDB/TMDB can't be auto-resolved so the UI can show a picker overlay
+  - `GET /api/watchlist/sonarr-lookup`, `GET /api/watchlist/radarr-lookup` - Title search against Sonarr/Radarr for the disambiguation picker
+  - `GET /api/watchlist/resolve-stream` - SSE resolve preview (walks TVDB link → prequel chain → title search)
+  - `POST /api/smart-move/preview`, `POST /api/smart-move/execute` - Filesystem "Fix Location" for a single library item **not** managed by Sonarr/Radarr; reuses the restructurer (franchise-root nesting, NFO, orphan cleanup) to relocate one on-disk folder
   - `GET /glance/rate-completed` - Key-gated iframe page for the Glance "Rate Your Completed Shows" widget
   - `POST /glance/rate-completed/submit` - Key-gated rating submission from the Glance widget
   - `POST /arr-webhook` - Sonarr/Radarr webhook receiver
@@ -720,6 +726,9 @@ alias alstop='docker-compose down'           # Stop Anilist-Link
 - Post-processor: naming templates, series groups, season mappings, file renaming, Sonarr path sync + rescan
 - Webhook auto-registration (schema-based), SSE resolve with live progress, S1 title variants for sequel search
 - Full automation (auto-search on new CURRENT status) partial — DownloadSyncer exists
+- Disambiguation overlay for both Sonarr (TVDB) and Radarr (TMDB) when an entry can't be auto-resolved — user picks the correct match
+- Movie handling: franchise-root nesting, movie-vs-TV-season folder disambiguation, year backfill, group NFO, and orphaned-source cleanup on every arr move
+- Smart Move ("Fix Location") for on-disk library items *arr doesn't manage a file for (e.g. a movie whose file came from elsewhere but shares a Sonarr series with the TV seasons)
 
 **General**:
 - Crunchyroll client needs ongoing maintenance as the unofficial API changes

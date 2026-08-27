@@ -285,6 +285,7 @@ SETTINGS_MAP: dict[str, tuple[str, str]] = {
     "library.split_movies_tv": ("LIBRARY_SPLIT_MOVIES_TV", "false"),
     "library.movie_output_path": ("LIBRARY_MOVIE_OUTPUT_PATH", ""),
     "library.tv_output_path": ("LIBRARY_TV_OUTPUT_PATH", ""),
+    "library.import_path": ("LIBRARY_IMPORT_PATH", ""),
     "naming.file_template": ("NAMING_FILE_TEMPLATE", "{title} - S{season}E{episode}"),
     "naming.folder_template": ("NAMING_FOLDER_TEMPLATE", "{title}"),
     "naming.season_folder_template": (

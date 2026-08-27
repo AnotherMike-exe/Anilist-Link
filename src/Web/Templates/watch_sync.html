@@ -265,7 +265,7 @@
               <strong>{{ entry.after_status }}</strong> ep {{ entry.after_progress }}
             </td>
             <td style="white-space:nowrap;font-size:0.8rem" class="text-muted">
-              {{ entry.applied_at[:16] if entry.applied_at else '—' }}
+              {{ (entry.applied_at | localtime)[:16] if entry.applied_at else '—' }}
             </td>
             <td>
               {% if entry.direction == 'to_media' %}

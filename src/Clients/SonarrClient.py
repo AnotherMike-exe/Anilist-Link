@@ -59,9 +59,29 @@ class SonarrClient(ServarrBaseClient):
         return await self._get_by_id("series", series_id)
 
     async def get_series_by_tvdb_id(self, tvdb_id: int) -> dict[str, Any] | None:
-        """Find a series in Sonarr by TVDB ID."""
-        all_series = await self.get_all_series()
-        for s in all_series:
+        """Find a series in Sonarr by TVDB ID.
+
+        Asks Sonarr to filter server-side; fetching the whole library just to
+        scan it makes every add carry a multi-megabyte response.  Older or
+        unexpected responses are filtered client-side anyway, so a server that
+        ignores the parameter still gives the right answer.
+        """
+        try:
+            resp = await self._http.get(
+                self._endpoint("series"), params={"tvdbId": tvdb_id}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            logger.debug(
+                "tvdbId-filtered series lookup failed; falling back to full list",
+                exc_info=True,
+            )
+            data = await self.get_all_series()
+
+        if isinstance(data, dict):
+            data = [data]
+        for s in data or []:
             if s.get("tvdbId") == tvdb_id:
                 return s
         return None
@@ -340,6 +360,86 @@ class SonarrClient(ServarrBaseClient):
         """Return all episode records for a series."""
         resp = await self._http.get(
             self._endpoint("episode"), params={"seriesId": series_id}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    # ------------------------------------------------------------------
+    # Manual import (associate on-disk files with episodes)
+    # ------------------------------------------------------------------
+
+    async def get_manual_import_candidates(
+        self,
+        folder: str,
+        series_id: int | None = None,
+        season_number: int | None = None,
+        filter_existing_files: bool = True,
+    ) -> list[dict[str, Any]]:
+        """List files under *folder* that Sonarr could import.
+
+        This is what the "Manage Episodes" dialog shows: each entry carries the
+        quality/language/release-group Sonarr parsed out of the filename, plus
+        whichever episodes it managed to match — an empty ``episodes`` list is
+        the "unknown" row the UI displays when the numbering means nothing to
+        Sonarr.
+
+        With *filter_existing_files* left on, files Sonarr already tracks are
+        left out, so what comes back is exactly the set that still needs
+        associating.
+        """
+        params: dict[str, Any] = {
+            "folder": folder,
+            "filterExistingFiles": "true" if filter_existing_files else "false",
+        }
+        if series_id:
+            params["seriesId"] = series_id
+        if season_number is not None:
+            params["seasonNumber"] = season_number
+        resp = await self._http.get(
+            self._endpoint("manualimport"), params=params, timeout=120.0
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def manual_import(
+        self, files: list[dict[str, Any]], import_mode: str = "Auto"
+    ) -> dict[str, Any]:
+        """Associate already-on-disk files with specific episodes.
+
+        Sonarr only moves or renames a file it considers a *new* download, and
+        it decides that by asking whether the file already lives inside the
+        series folder. Every file handed to this method must therefore be under
+        the series path — the caller is responsible for that, and it is what
+        guarantees the files are registered where they already sit.
+        """
+        resp = await self._http.post(
+            self._endpoint("command"),
+            json={"name": "ManualImport", "importMode": import_mode, "files": files},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def get_command(self, command_id: int) -> dict[str, Any] | None:
+        """Return a queued command's record, for polling until it completes."""
+        return await self._get_by_id("command", command_id)
+
+    async def get_quality_definitions(self) -> list[dict[str, Any]]:
+        """Return every quality Sonarr knows, each with its source and resolution."""
+        resp = await self._http.get(self._endpoint("qualitydefinition"))
+        resp.raise_for_status()
+        return resp.json()
+
+    async def set_episode_files_quality(
+        self, episode_file_ids: list[int], quality: dict[str, Any]
+    ) -> Any:
+        """Set the quality on existing episode files, leaving the files alone.
+
+        This is the bulk edit the "Manage Episodes" quality dropdown performs;
+        it rewrites the database record only.
+        """
+        resp = await self._http.put(
+            self._endpoint("episodefile/editor"),
+            json={"episodeFileIds": episode_file_ids, "quality": quality},
         )
         resp.raise_for_status()
         return resp.json()

@@ -14,7 +14,7 @@ from src.Database.Models import INDEXES, TABLES
 
 logger = logging.getLogger(__name__)
 
-LATEST_VERSION = 3
+LATEST_VERSION = 4
 
 
 async def run_migrations(db: aiosqlite.Connection) -> None:
@@ -28,6 +28,8 @@ async def run_migrations(db: aiosqlite.Connection) -> None:
         await _apply_v2(db)
     if current < 3:
         await _apply_v3(db)
+    if current < 4:
+        await _apply_v4(db)
 
 
 async def _get_current_version(db: aiosqlite.Connection) -> int:
@@ -97,3 +99,50 @@ async def _apply_v3(db: aiosqlite.Connection) -> None:
     await db.execute("INSERT INTO schema_version (version) VALUES (?)", (3,))
     await db.commit()
     logger.info("Migration v3 applied: anilist_cache synonyms column added")
+
+
+async def _apply_v4(db: aiosqlite.Connection) -> None:
+    """Let a Sonarr season hold more than one AniList entry.
+
+    The old primary key was (sonarr_id, season_number), so a split cour — two
+    AniList entries inside one Sonarr season — could only store one of them;
+    the second silently replaced the first and every episode in that season was
+    filed under whichever won.  Adds an episode range and widens the key.
+
+    Existing rows become whole-season mappings (1 → end), which is exactly what
+    they meant under the old schema.
+    """
+    logger.info("Applying migration v4: per-episode-range season mappings")
+
+    cursor = await db.execute("PRAGMA table_info(anilist_sonarr_season_mapping)")
+    cols = {row[1] for row in await cursor.fetchall()}
+
+    if "episode_start" not in cols:
+        # SQLite can't alter a primary key, so rebuild the table.
+        await db.execute("""CREATE TABLE anilist_sonarr_season_mapping_v4 (
+                   sonarr_id     INTEGER NOT NULL,
+                   season_number INTEGER NOT NULL,
+                   anilist_id    INTEGER NOT NULL,
+                   episode_start INTEGER NOT NULL DEFAULT 1,
+                   episode_end   INTEGER,
+                   created_at    TEXT DEFAULT (datetime('now')),
+                   PRIMARY KEY (sonarr_id, season_number, episode_start)
+               )""")
+        await db.execute("""INSERT INTO anilist_sonarr_season_mapping_v4
+                   (sonarr_id, season_number, anilist_id,
+                    episode_start, episode_end, created_at)
+               SELECT sonarr_id, season_number, anilist_id, 1, NULL, created_at
+               FROM anilist_sonarr_season_mapping""")
+        await db.execute("DROP TABLE anilist_sonarr_season_mapping")
+        await db.execute(
+            "ALTER TABLE anilist_sonarr_season_mapping_v4"
+            " RENAME TO anilist_sonarr_season_mapping"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assm_sonarr"
+            " ON anilist_sonarr_season_mapping(sonarr_id)"
+        )
+
+    await db.execute("INSERT INTO schema_version (version) VALUES (?)", (4,))
+    await db.commit()
+    logger.info("Migration v4 applied: season mappings now carry episode ranges")

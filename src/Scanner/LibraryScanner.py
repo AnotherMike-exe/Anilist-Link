@@ -82,6 +82,9 @@ class LibraryScanner:
         progress.phase = "Matching folders to AniList"
 
         existing_paths = await self._db.get_library_item_folder_paths(library_id)
+        # Season-subdir rows created below.  They must survive the prune step,
+        # which only knows about top-level folders.
+        expanded_paths: set[str] = set()
 
         for folder_path, folder_name in folders:
             progress.current_item = folder_name
@@ -95,6 +98,9 @@ class LibraryScanner:
                     (library_id, folder_path),
                 )
                 if item and item.get("anilist_id"):
+                    expanded_paths |= await self._expand_season_subdirs(
+                        library_id, folder_path, int(item["anilist_id"])
+                    )
                     matched += 1
                     continue
 
@@ -117,6 +123,9 @@ class LibraryScanner:
                     year=(cached or {}).get("year", 0),
                     cover_image=(cached or {}).get("cover_image", ""),
                     series_group_id=cross_match.get("series_group_id"),
+                )
+                expanded_paths |= await self._expand_season_subdirs(
+                    library_id, folder_path, xref_id
                 )
                 matched += 1
                 continue
@@ -176,11 +185,16 @@ class LibraryScanner:
                 year=year,
                 cover_image=cover,
             )
+            expanded_paths |= await self._expand_season_subdirs(
+                library_id, folder_path, anilist_id
+            )
             matched += 1
 
-        # Prune items for folders that no longer exist
+        # Prune items for folders that no longer exist.  Season subdirs count as
+        # current — without them the prune would delete every per-season row,
+        # which is what left sub-seasons showing no path after a rescan.
         progress.phase = "Cleaning up removed folders"
-        current_folder_paths = {fp for fp, _ in folders}
+        current_folder_paths = {fp for fp, _ in folders} | expanded_paths
         pruned = await self._db.delete_library_items_not_in(
             library_id, current_folder_paths
         )
@@ -196,6 +210,81 @@ class LibraryScanner:
             "total": len(folders),
             "pruned": pruned,
         }
+
+    async def _expand_season_subdirs(
+        self,
+        library_id: int,
+        folder_path: str,
+        anilist_id: int,
+    ) -> set[str]:
+        """Create a library_items row per season subfolder of a grouped show.
+
+        A restructured show is laid out as ``Show/Season Name/``, but the scan
+        only walks top-level folders — so only the root entry ever got a row and
+        every other season in the group showed no path.  When the matched entry
+        belongs to a multi-entry series group, match each subfolder to its own
+        group entry and give it a row of its own.
+
+        Returns the subfolder paths written, so the caller can keep them out of
+        the prune set.  Best-effort: any failure leaves the root row as-is.
+        """
+        written: set[str] = set()
+        try:
+            group = await self._db.get_series_group_by_anilist_id(anilist_id)
+            if not group or not group.get("id"):
+                return written
+            entries = await self._db.get_series_group_entries_with_titles(
+                int(group["id"])
+            )
+            if len(entries) < 2:
+                return written  # single-entry group — the root row is enough
+
+            try:
+                subdirs = sorted(
+                    os.path.join(folder_path, n)
+                    for n in os.listdir(folder_path)
+                    if not n.startswith(".")
+                    and os.path.isdir(os.path.join(folder_path, n))
+                )
+            except OSError:
+                return written
+            if not subdirs:
+                return written
+
+            from src.Scanner.LibraryRestructurer import _match_subdir_to_entry
+
+            pool = [dict(e) for e in entries]
+            root_name = os.path.basename(folder_path.rstrip("/"))
+            for subdir in subdirs:
+                entry = _match_subdir_to_entry(
+                    os.path.basename(subdir), pool, consume=True
+                )
+                if not entry:
+                    continue
+                sub_aid = int(entry["anilist_id"])
+                cached = await self._db.get_cached_metadata(sub_aid) or {}
+                await self._db.upsert_library_item(
+                    library_id=library_id,
+                    folder_path=subdir,
+                    folder_name=root_name,
+                    anilist_id=sub_aid,
+                    anilist_title=entry.get("display_title", ""),
+                    match_confidence=1.0,
+                    match_method="season_subdir",
+                    anilist_format=cached.get("format", ""),
+                    anilist_episodes=cached.get("episodes"),
+                    year=cached.get("year", 0),
+                    cover_image=cached.get("cover_image", ""),
+                    series_group_id=int(group["id"]),
+                )
+                written.add(subdir)
+            if written:
+                logger.info(
+                    "  [seasons] %s -> %d season row(s)", root_name, len(written)
+                )
+        except Exception:
+            logger.debug("Season expansion failed for %s", folder_path, exc_info=True)
+        return written
 
     async def detect_changes(
         self, library_id: int, paths: list[str]

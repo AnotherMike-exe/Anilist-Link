@@ -210,6 +210,36 @@ The recommended output structure (Structure A) is one folder per AniList entry:
 - `POST /restructure/execute` — Execute approved file moves
 - `GET /restructure/results` — Show results and any errors
 - `GET /restructure/report` — Audit log of past restructures
+- `POST /api/smart-move/preview`, `POST /api/smart-move/execute` — **Smart Move
+  (Fix Location)**: run the restructurer on a *single* library item that isn't
+  tracked in Sonarr/Radarr. Builds a one-element `ShowInput` from the
+  `library_items` row, analyzes with `force_franchise_root=True`, and (on
+  execute) relocates just that item, re-points the row + local mapping, and
+  triggers a media-server refresh. Surfaced as a per-item "Fix Location" button
+  on the Library detail and watchlist pages.
+
+### 4.6. Franchise-root nesting for movies
+
+A franchise movie (e.g. a Demon Slayer film) should nest under its series-group
+ROOT folder alongside the TV seasons (Structure A), not sit in a separate
+top-level directory. Both movers resolve the franchise root the same way:
+
+1. Use the series group's `root_anilist_id` when it already traces to a
+   *distinct* root.
+2. Otherwise walk the AniList **PREQUEL** chain back to the base
+   (`resolve_franchise_root_id` in `NamingTranslator`) — this recovers the root
+   even when the stored group is stale/self-rooted.
+
+- **Restructurer** (`LibraryRestructurer._analyze_full_restructure`): a lone
+  franchise entry nests under the rendered root folder; the walk is gated to
+  MOVIE format during a full library pass but forced for the single-item Smart
+  Move. A relocation to a new parent counts as a change even when the folder
+  name is unchanged (full-path comparison, not basename).
+- **Arr post-processor** (`ArrPostProcessor`): Sonarr/Radarr "Move to Library"
+  nests the movie under the root, gives it its own title folder (not a season
+  folder) with a collision-safe backup so it can't clash with a same-named TV
+  season, backfills the root's cached year, writes the group `tvshow.nfo`, and
+  prunes the orphaned source folder (`prune_orphaned_dir`).
 
 ---
 
@@ -653,7 +683,28 @@ Anilist-Link/
 
 New `app_settings` keys for the Rate Your Completed Shows / Glance feature: `anilist.score_format`, `anilist.score_format_updated_at`, `app.show_unrated_completed`, `glance.api_key` — no schema migration required, `user_watchlist.score` already existed in the v1 baseline.
 
-### 10.2. In-Memory Cache
+### 10.2. Timestamps & Timezones
+
+**All timestamps are stored in UTC.** Every `created_at` / `applied_at` /
+`executed_at` / `synced_at` column defaults to SQLite's `datetime('now')`, and
+the Python writers use `datetime.now(timezone.utc)`. Nothing in the database is
+local time.
+
+Conversion happens once, at render time:
+
+| Layer | Responsibility |
+|-------|----------------|
+| `src/Utils/Time.py` | `get_timezone()` resolves `TZ` (via `zoneinfo`, falling back to system local then UTC); `parse_utc()` accepts both the SQLite `YYYY-MM-DD HH:MM:SS` form and ISO-8601 with `T`/`Z`/offsets; `to_local()` / `to_local_date()` format in the configured zone |
+| `src/Web/App.py` | Registers the `localtime` and `localdate` Jinja filters bound to `config.timezone` |
+| Templates | Render every stored timestamp through `\| localtime` or `\| localdate` — never raw |
+| `src/Scheduler/Jobs.py` | `AsyncIOScheduler` and every `CronTrigger` are constructed with an explicit `tzinfo` rather than letting APScheduler guess via tzlocal |
+| `Dockerfile` / `entrypoint.sh` | Install `tzdata` and point `/etc/localtime` + `/etc/timezone` at `$TZ` so the zone resolves at all |
+
+Rendering a stored value raw is the bug this exists to prevent: a job that ran at
+02:00 America/Los_Angeles is stored as 09:00 UTC and, printed unconverted, shows
+as an hour that has not happened yet.
+
+### 10.3. In-Memory Cache
 
 Short-lived caching of frequently accessed data during active scan/sync operations. Rate limit state is maintained in the `RateLimiter` instance on the `AniListClient`.
 

@@ -173,6 +173,11 @@ FIELD_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
                 "TV / Everything Else output directory",
                 "dir_picker_single",
             ),
+            (
+                "library.import_path",
+                "Import folder (drop media here for review)",
+                "dir_picker_single",
+            ),
         ],
     ),
     (
@@ -363,6 +368,14 @@ _SERVICE_SETTING_KEYS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Notification action_urls tied to each media service. When a service is
+# unlinked these notices are dismissed so scan/setup prompts for a
+# disconnected service do not linger in the notification bar.
+_SERVICE_NOTICE_URLS: dict[str, tuple[str, ...]] = {
+    "plex": ("/scan/plex/results", "/plex"),
+    "jellyfin": ("/jellyfin/scan/results", "/jellyfin"),
+}
+
 
 @router.post("/settings/unlink/{service}")
 async def unlink_service(request: Request, service: str) -> JSONResponse:
@@ -388,6 +401,12 @@ async def unlink_service(request: Request, service: str) -> JSONResponse:
     # Clear the service's settings keys so they fall back to defaults.
     for key in _SERVICE_SETTING_KEYS[service]:
         await db.execute("DELETE FROM app_settings WHERE key=?", (key,))
+
+    # Clear any lingering notifications for this service (scan/setup prompts)
+    # so they do not persist after the connection is removed.
+    for notice_url in _SERVICE_NOTICE_URLS.get(service, ()):
+        await db.dismiss_notifications_by_url(notice_url)
+    await db.clear_dismissed_notifications()
 
     # Rebuild config so the cleared credentials take effect immediately.
     db_settings = await db.get_all_settings()

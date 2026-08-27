@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, tzinfo
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -12,6 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from src.Utils.Config import SchedulerConfig
+from src.Utils.Time import get_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +27,18 @@ JOB_LIBRARY_REINDEX = "library_reindex"
 JOB_WATCHLIST_REFRESH = "watchlist_refresh"
 
 
-def _cr_trigger(config: SchedulerConfig) -> CronTrigger | IntervalTrigger:
+def _cr_trigger(
+    config: SchedulerConfig, tz: tzinfo | None = None
+) -> CronTrigger | IntervalTrigger:
     """Return the appropriate trigger for the Crunchyroll sync job.
 
     If ``config.cr_sync_time`` is a valid ``HH:MM`` string, returns a
-    :class:`CronTrigger` that fires once daily at that local time.
+    :class:`CronTrigger` that fires once daily at that time in ``tz``.
     Otherwise falls back to an :class:`IntervalTrigger` using
     ``sync_interval_minutes``.
+
+    ``tz`` must be passed explicitly: a ``CronTrigger`` built without one
+    resolves its own zone via tzlocal rather than inheriting the scheduler's.
     """
     time_str = (config.cr_sync_time or "").strip()
     if time_str:
@@ -41,9 +47,12 @@ def _cr_trigger(config: SchedulerConfig) -> CronTrigger | IntervalTrigger:
             try:
                 hour, minute = int(parts[0]), int(parts[1])
                 logger.info(
-                    "Crunchyroll sync scheduled daily at %02d:%02d", hour, minute
+                    "Crunchyroll sync scheduled daily at %02d:%02d (%s)",
+                    hour,
+                    minute,
+                    tz or "system local time",
                 )
-                return CronTrigger(hour=hour, minute=minute)
+                return CronTrigger(hour=hour, minute=minute, timezone=tz)
             except ValueError:
                 logger.warning(
                     "Invalid cr_sync_time '%s' — falling back to interval", time_str
@@ -54,9 +63,14 @@ def _cr_trigger(config: SchedulerConfig) -> CronTrigger | IntervalTrigger:
 class JobScheduler:
     """Wrapper around APScheduler for managing periodic jobs."""
 
-    def __init__(self, config: SchedulerConfig) -> None:
+    def __init__(self, config: SchedulerConfig, timezone: str | None = None) -> None:
         self._config = config
-        self._scheduler = AsyncIOScheduler()
+        # Resolve TZ explicitly instead of letting APScheduler guess via
+        # tzlocal. Without this a cron job configured for 02:00 silently runs
+        # at 02:00 UTC when the container has no /etc/localtime.
+        self._timezone = get_timezone(timezone)
+        self._scheduler = AsyncIOScheduler(timezone=self._timezone)
+        logger.info("Scheduler timezone: %s", self._timezone)
 
     def register_jobs(
         self,
@@ -76,7 +90,7 @@ class JobScheduler:
         if crunchyroll_sync_func:
             self._scheduler.add_job(
                 crunchyroll_sync_func,
-                trigger=_cr_trigger(self._config),
+                trigger=_cr_trigger(self._config, self._timezone),
                 id=JOB_CRUNCHYROLL_SYNC,
                 name="Crunchyroll Watch History Sync",
                 replace_existing=True,
@@ -224,7 +238,7 @@ class JobScheduler:
         if cr_changed:
             job = self._scheduler.get_job(JOB_CRUNCHYROLL_SYNC)
             if job:
-                trigger = _cr_trigger(new_config)
+                trigger = _cr_trigger(new_config, self._timezone)
                 job.reschedule(trigger=trigger)
                 logger.info("Rescheduled %s with updated trigger", JOB_CRUNCHYROLL_SYNC)
 
@@ -293,7 +307,7 @@ class JobScheduler:
         if job is None:
             logger.warning("Job %s not found", job_id)
             return False
-        job.modify(next_run_time=datetime.now())
+        job.modify(next_run_time=datetime.now(self._timezone))
         logger.info("Manually triggered job: %s", job_id)
         return True
 

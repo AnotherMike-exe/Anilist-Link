@@ -6,10 +6,21 @@
 <div class="page-header">
     <h1><img src="/static/img/sonarr.webp" alt="Sonarr" class="page-service-logo"><img src="/static/img/radarr.png" alt="Radarr" class="page-service-logo">Download Manager</h1>
     <p class="page-subtitle">Add anime to Sonarr (series) or Radarr (movies) via AniList.</p>
+    <p class="text-muted hint" style="max-width:62ch">
+        Search AniList below to add a single title, or let the scheduled sync add everything on your
+        watchlist automatically. Either way the entry is resolved to a TVDB or TMDB ID first, and the
+        AniList&nbsp;&#8596;&nbsp;Sonarr/Radarr link is stored so downloads can be filed under the right
+        AniList season later.
+    </p>
     <div style="margin-top:0.75rem">
         <button class="btn btn-secondary" id="sync-now-btn" onclick="runSyncNow()">Sync Watchlist Now</button>
         <span id="sync-now-result" style="margin-left:0.75rem;font-size:0.9rem;color:var(--text-muted)"></span>
     </div>
+    <p class="text-muted" style="font-size:0.8rem;margin-top:0.4rem;max-width:62ch">
+        Runs the auto-add sync immediately instead of waiting for its schedule. It adds watchlist
+        entries whose list status is enabled under <a href="/settings#settings-downloads">Settings &rarr; Downloads</a>;
+        anything already linked to Sonarr/Radarr is skipped.
+    </p>
 </div>
 
 {% if not sonarr_configured and not radarr_configured %}
@@ -22,6 +33,10 @@
 <!-- Search -->
 <section class="card" id="search-section">
     <h2>Search AniList</h2>
+    <p class="text-muted hint">
+        Searches AniList directly, so titles that aren't on your watchlist can be added too.
+        Pick a result to choose where it lands.
+    </p>
     <div class="form-row">
         <input
             type="search"
@@ -49,6 +64,10 @@
                 {% if sonarr_configured %}<option value="sonarr">Sonarr (TV Series)</option>{% endif %}
                 {% if radarr_configured %}<option value="radarr">Radarr (Movie)</option>{% endif %}
             </select>
+            <p class="field-hint">
+                Preselected from the AniList format &mdash; MOVIE entries go to Radarr, everything
+                else (TV, ONA, OVA, specials) to Sonarr. Change it if AniList has the format wrong.
+            </p>
         </div>
 
         <div class="form-group">
@@ -56,6 +75,10 @@
             <select id="modal-quality" class="form-control">
                 <option value="">Loading…</option>
             </select>
+            <p class="field-hint">
+                Loaded live from the selected service. Anime profiles that allow multi-episode
+                and batch releases tend to give the best hit rate.
+            </p>
         </div>
 
         <div class="form-group">
@@ -63,6 +86,11 @@
             <select id="modal-folder" class="form-control">
                 <option value="">Loading…</option>
             </select>
+            <p class="field-hint">
+                Where the series/movie folder is created. Set an
+                <a href="/settings">anime root folder</a> in Settings to keep anime out of your
+                general TV and movie libraries &mdash; the auto-sync always uses that one.
+            </p>
         </div>
 
         <div class="form-group checkbox-group">
@@ -70,6 +98,10 @@
                 <input type="checkbox" id="modal-monitored" checked>
                 Monitored
             </label>
+            <p class="field-hint">
+                On: the service will grab releases for this title. Off: it's added to the library
+                for tracking only and nothing is downloaded.
+            </p>
         </div>
 
         <div class="form-group" id="monitor-strategy-group">
@@ -81,6 +113,16 @@
                 <option value="latestSeason">Latest Season</option>
                 <option value="none">None</option>
             </select>
+            <p class="field-hint">
+                Which episodes Sonarr monitors on the TVDB series &mdash; note this covers the whole
+                series, not just the AniList season you searched for.
+                <strong>Future</strong> only picks up episodes airing from now on;
+                <strong>All</strong> pulls the full back catalogue;
+                <strong>First</strong>/<strong>Latest Season</strong> limit it to one season;
+                <strong>None</strong> adds the series without monitoring anything.
+                Sonarr entries are created as type <em>Anime</em> with season folders off &mdash;
+                AniList-named season folders are created for you when files are processed.
+            </p>
         </div>
 
         <div class="form-group checkbox-group">
@@ -88,6 +130,11 @@
                 <input type="checkbox" id="modal-search-immediately">
                 Search for existing episodes/movie immediately
             </label>
+            <p class="field-hint">
+                Kicks off an indexer search as soon as the title is added, instead of waiting for
+                the next scheduled search. Leave off when adding a lot at once to avoid hammering
+                your indexers. Ignored when Monitored is off.
+            </p>
         </div>
 
         <div id="modal-error" class="alert alert-error hidden"></div>
@@ -102,6 +149,13 @@
 <!-- Recent requests -->
 <section class="card" id="recent-section">
     <h2>Recent Requests</h2>
+    <p class="text-muted hint">
+        Add requests made from this page, newest first. <strong>Added</strong> means the title is
+        now in Sonarr/Radarr, <strong>Exists</strong> that it was already there and was just linked
+        to AniList, and <strong>Error</strong> that the TVDB/TMDB ID couldn't be resolved or the
+        service rejected the add. Titles added from the watchlist page or by the scheduled
+        auto-sync aren't listed here.
+    </p>
     {% if recent_requests %}
     <table class="data-table">
         <thead>
@@ -134,7 +188,7 @@
                     {% if req.tvdb_id %}TVDB:{{ req.tvdb_id }}{% endif %}
                     {% if req.tmdb_id %}TMDB:{{ req.tmdb_id }}{% endif %}
                 </td>
-                <td class="text-sm text-muted">{{ req.created_at[:16] if req.created_at else '' }}</td>
+                <td class="text-sm text-muted">{{ (req.created_at | localtime)[:16] if req.created_at else '' }}</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -410,6 +464,9 @@
         setTimeout(() => toast.remove(), 4000);
     }
 
+    // Exposed on window: the button uses an inline onclick, which resolves
+    // against global scope, and everything in this file lives in an IIFE.
+    window.runSyncNow = runSyncNow;
     async function runSyncNow() {
         const btn = document.getElementById('sync-now-btn');
         const res = document.getElementById('sync-now-result');

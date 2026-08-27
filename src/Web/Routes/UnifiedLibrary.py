@@ -11,6 +11,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.responses import Response
 
+from src.Web.Routes.Helpers import apply_arr_state, load_arr_state
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["unified-library"])
@@ -124,6 +126,10 @@ async def _get_local_items(db: Any) -> list[dict[str, Any]]:
                 virtual_entry["title_native"] = sge.get("title_native") or ""
                 virtual_entry["title_synonyms"] = sge.get("title_synonyms") or "[]"
                 virtual_entry["year"] = sge.get("anilist_year") or None
+                # Use the group MEMBER's own episode count — not the parent
+                # row's — so a franchise movie doesn't inherit the TV season's
+                # episode total (e.g. a 1-ep movie showing as 26 eps).
+                virtual_entry["episodes"] = sge.get("episodes")
                 result.append(virtual_entry)
     return result
 
@@ -219,8 +225,17 @@ def _aggregate_by_anilist_id(
                 for s in item["sources"]:
                     if s not in existing["sources"]:
                         existing["sources"].append(s)
-                # If a non-virtual item merges in, result is non-virtual
+                # If a non-virtual item merges in, its real on-disk facts
+                # (path + own episode count) are authoritative over a virtual
+                # series-group expansion that copied a parent row's values.
                 if not item.get("virtual", False):
+                    if existing.get("virtual", False):
+                        existing["folder_path"] = item.get("folder_path", "")
+                        existing["folder_name"] = item.get("folder_name", "")
+                        existing["source_id"] = item.get(
+                            "source_id", existing.get("source_id")
+                        )
+                        existing["episodes"] = item.get("episodes")
                     existing["virtual"] = False
                 # Prefer AniList cover; keep first non-null cover
                 if not existing["cover_url"] and item["cover_url"]:
@@ -312,6 +327,17 @@ async def unified_library(
                 item["list_status"] = wl_map[aid]["list_status"]
                 item["progress"] = wl_map[aid]["progress"]
 
+    # Sonarr/Radarr state, from the same helper the watchlist uses so both
+    # pages report tracking identically.
+    sonarr_info, radarr_info = await load_arr_state(db)
+    for item in items:
+        apply_arr_state(item, item.get("anilist_id"), sonarr_info, radarr_info)
+
+    cfg = request.app.state.config
+    arr_enabled = bool(cfg.sonarr.url and cfg.sonarr.api_key) or bool(
+        cfg.radarr.url and cfg.radarr.api_key
+    )
+
     matched_count = sum(1 for i in items if i.get("anilist_id"))
     title_display = await db.get_setting("app.title_display") or "romaji"
 
@@ -326,6 +352,7 @@ async def unified_library(
             "plex_configured": plex_configured,
             "jellyfin_configured": jellyfin_configured,
             "title_display": title_display,
+            "arr_enabled": arr_enabled,
             "message": request.query_params.get("message") or "",
             "error": request.query_params.get("error") or "",
             "version": "0.1.0",

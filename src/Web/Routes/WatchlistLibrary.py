@@ -13,6 +13,10 @@ from starlette.responses import StreamingResponse
 from src.Clients.RadarrClient import RadarrClient
 from src.Clients.SonarrClient import SonarrClient
 from src.Download.MappingResolver import MappingResolver
+from src.Download.SeasonRangeMapper import (
+    assign_season_ranges,
+    persist_season_ranges,
+)
 from src.Scanner.SeriesGroupBuilder import SeriesGroupBuilder
 from src.Utils.NamingTranslator import (
     GET_FULL_MEDIA_QUERY,
@@ -268,6 +272,88 @@ async def sonarr_lookup(request: Request) -> JSONResponse:
     return JSONResponse({"candidates": candidates[:8]})
 
 
+def _radarr_candidate(r: dict) -> dict:
+    """Normalize a Radarr movie/lookup object into a disambiguation candidate."""
+    poster = r.get("remotePoster") or (
+        r["images"][0].get("remoteUrl", "") if r.get("images") else ""
+    )
+    return {
+        "tmdb_id": r.get("tmdbId"),
+        "title": r.get("title", ""),
+        "year": r.get("year"),
+        "status": r.get("status", ""),
+        "overview": (r.get("overview") or "")[:200],
+        "remote_poster": poster,
+    }
+
+
+@router.get("/api/watchlist/radarr-lookup")
+async def radarr_lookup(request: Request) -> JSONResponse:
+    """Search Radarr's movie lookup for disambiguation candidates.
+
+    Query params: q (title to search)
+    """
+    config = request.app.state.config
+    q = request.query_params.get("q", "").strip()
+    if not q:
+        return JSONResponse({"error": "q is required"}, status_code=400)
+    if not config.radarr.url or not config.radarr.api_key:
+        return JSONResponse({"error": "Radarr not configured"}, status_code=503)
+
+    client = RadarrClient(url=config.radarr.url, api_key=config.radarr.api_key)
+    try:
+        results = await client.lookup_movie(q)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    finally:
+        await client.close()
+
+    candidates = [_radarr_candidate(r) for r in results if r.get("tmdbId")]
+    return JSONResponse({"candidates": candidates[:8]})
+
+
+async def _radarr_title_candidates(
+    radarr_client: RadarrClient,
+    anilist_client: Any,
+    anilist_id: int,
+    primary_title: str,
+) -> list[dict]:
+    """Search Radarr by the AniList title chain and return movie candidates.
+
+    Used to seed the disambiguation picker when AniList has no TMDB link.
+    """
+    titles: list[str] = [primary_title] if primary_title else []
+    try:
+        media_data = await anilist_client._execute_query(
+            GET_FULL_MEDIA_QUERY, {"id": anilist_id}
+        )
+        full_media = media_data.get("Media", {})
+        if full_media:
+            chain = [t for t in build_title_chain(full_media) if t and len(t) > 2]
+            if chain:
+                titles = chain
+    except Exception as exc:
+        logger.debug("Could not build title chain for radarr lookup: %s", exc)
+
+    seen: set[int] = set()
+    out: list[dict] = []
+    for term in titles:
+        try:
+            results = await radarr_client.lookup_movie(term)
+        except Exception as exc:
+            logger.debug("Radarr lookup failed for %r: %s", term, exc)
+            continue
+        for r in results:
+            tid = r.get("tmdbId")
+            if not tid or tid in seen:
+                continue
+            seen.add(tid)
+            out.append(_radarr_candidate(r))
+        if len(out) >= 8:
+            break
+    return out[:8]
+
+
 async def _auto_link_sonarr_siblings(
     db: Any,
     anilist_client: Any,
@@ -276,6 +362,8 @@ async def _auto_link_sonarr_siblings(
     sonarr_id: int,
     sonarr_url: str,
     sonarr_api_key: str,
+    config: Any = None,
+    app_state: Any = None,
 ) -> None:
     """Background: BFS-traverse the full SEQUEL/PREQUEL chain and auto-link siblings.
 
@@ -359,57 +447,14 @@ async def _auto_link_sonarr_siblings(
                 "Could not fetch Sonarr seasons for series_id=%d: %s", sonarr_id, exc
             )
 
-        # Season assignment: prefer 1:1 when counts match, else try cumulative
-        season_map: dict[int, int | None] = {}
-        if sonarr_seasons and len(chain) == len(sonarr_seasons):
-            # Perfect 1:1 chronological assignment
-            for idx, aid in enumerate(chain):
-                season_map[aid] = sonarr_seasons[idx]
-            logger.info(
-                "Season assignment (1:1) for tvdb_id=%d: %s",
-                tvdb_id,
-                {aid: season_map[aid] for aid in chain},
-            )
-        elif sonarr_seasons and all(episode_counts.get(aid) for aid in chain):
-            # Cumulative episode-range assignment: map each AniList entry to
-            # whichever Sonarr season contains its starting episode.
-            # Multiple AniList parts can map to the same Sonarr season.
-            sonarr_ranges: list[tuple[int, int, int]] = []  # (start, end, season_num)
-            cum = 1
-            for sn in sonarr_seasons:
-                total = sonarr_season_totals.get(sn, 0)
-                if total > 0:
-                    sonarr_ranges.append((cum, cum + total - 1, sn))
-                    cum += total
-
-            anilist_start = 1
-            for aid in chain:
-                eps = episode_counts.get(aid) or 0
-                assigned: int | None = None
-                for s_start, s_end, sn in sonarr_ranges:
-                    if anilist_start <= s_end:
-                        assigned = sn
-                        break
-                season_map[aid] = assigned
-                anilist_start += eps
-
-            logger.info(
-                "Season assignment (cumulative) for tvdb_id=%d: %s",
-                tvdb_id,
-                {aid: season_map[aid] for aid in chain},
-            )
-        else:
-            for aid in chain:
-                season_map[aid] = None
-            if sonarr_seasons:
-                logger.debug(
-                    "Season assignment skipped: chain_len=%d sonarr_seasons=%d"
-                    " known_eps=%d for tvdb_id=%d",
-                    len(chain),
-                    len(sonarr_seasons),
-                    sum(1 for aid in chain if episode_counts.get(aid)),
-                    tvdb_id,
-                )
+        season_map, episode_ranges = assign_season_ranges(
+            chain, episode_counts, sonarr_seasons, sonarr_season_totals
+        )
+        logger.info(
+            "Season assignment for tvdb_id=%d: %s",
+            tvdb_id,
+            {aid: (season_map.get(aid), episode_ranges.get(aid)) for aid in chain},
+        )
 
         # Update root entry's sonarr_season if we now have an assignment
         root_season = season_map.get(root_anilist_id)
@@ -480,31 +525,115 @@ async def _auto_link_sonarr_siblings(
                 root_anilist_id,
             )
 
-        # Populate anilist_sonarr_season_mapping for the post-processor.
-        # Use INSERT OR REPLACE so re-adding a series always corrects stale mappings.
-        mapped_count = 0
-        for aid in chain:
-            s_num = season_map.get(aid)
-            if s_num is not None:
-                await db.execute(
-                    """INSERT OR REPLACE INTO anilist_sonarr_season_mapping
-                       (sonarr_id, season_number, anilist_id)
-                       VALUES (?, ?, ?)""",
-                    (sonarr_id, s_num, aid),
-                )
-                mapped_count += 1
+        mapped_count = await persist_season_ranges(
+            db, sonarr_id, season_map, episode_ranges, chain
+        )
         if mapped_count:
             logger.info(
                 "Populated %d season mappings for sonarr_id=%d",
                 mapped_count,
                 sonarr_id,
             )
+
+        # The series group and season mappings now exist, so the show folder
+        # resolves to the group root's title — which is how the restructurer
+        # named it.  Re-run the path sync: linking a sequel can only now find
+        # the library folder that the initial add (with no group yet) missed.
+        if config is not None:
+            try:
+                from src.Download.ArrPostProcessor import ArrPostProcessor
+
+                processor = ArrPostProcessor(db=db, config=config, app_state=app_state)
+                result = await processor.sync_sonarr_series_path(
+                    sonarr_id, root_anilist_id
+                )
+                logger.debug(
+                    "Post-link path sync for sonarr_id=%d: %s",
+                    sonarr_id,
+                    result.get("action"),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Post-link path sync failed for sonarr_id=%d: %s", sonarr_id, exc
+                )
     except Exception as exc:
         logger.warning(
             "auto_link_sonarr_siblings failed for anilist_id=%d: %s",
             root_anilist_id,
             exc,
         )
+
+
+async def _post_add_followups(
+    db: Any,
+    anilist_client: Any,
+    config: Any,
+    app_state: Any,
+    anilist_id: int,
+    service: str,
+    arr_id: int,
+    external_id: int | None,
+) -> None:
+    """Finish an add after the response has already gone back to the user.
+
+    Pushes AniList title variants so Sonarr can match releases, links the rest
+    of the sequel chain, and repoints the *arr record at the library folder.
+    None of it changes whether the add succeeded, so none of it belongs on the
+    request.  Failures are logged and never surface.
+    """
+    if service == "sonarr" and config.sonarr.url and config.sonarr.api_key:
+        client = SonarrClient(url=config.sonarr.url, api_key=config.sonarr.api_key)
+        try:
+            media_data = await anilist_client._execute_query(
+                GET_FULL_MEDIA_QUERY, {"id": anilist_id}
+            )
+            full_media = media_data.get("Media", {})
+            if full_media:
+                alt_titles = [
+                    t for t in build_title_chain(full_media) if t and len(t) > 2
+                ]
+                if alt_titles:
+                    await client.push_alt_titles(arr_id, alt_titles)
+                    logger.info(
+                        "Pushed %d alt titles to Sonarr for anilist_id=%d",
+                        len(alt_titles),
+                        anilist_id,
+                    )
+        except Exception as exc:
+            logger.warning("Could not push alt titles to Sonarr: %s", exc)
+        finally:
+            await client.close()
+
+        if external_id:
+            # Ends with its own path sync, once the series group exists.
+            await _auto_link_sonarr_siblings(
+                db=db,
+                anilist_client=anilist_client,
+                root_anilist_id=anilist_id,
+                tvdb_id=external_id,
+                sonarr_id=arr_id,
+                sonarr_url=config.sonarr.url,
+                sonarr_api_key=config.sonarr.api_key,
+                config=config,
+                app_state=app_state,
+            )
+        return
+
+    if service == "radarr":
+        try:
+            from src.Download.ArrPostProcessor import ArrPostProcessor
+
+            processor = ArrPostProcessor(db=db, config=config, app_state=app_state)
+            result = await processor.sync_radarr_movie_path(arr_id, anilist_id)
+            logger.debug(
+                "Post-add path sync for radarr_id=%d: %s",
+                arr_id,
+                result.get("action"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Post-add path sync failed for radarr_id=%d: %s", arr_id, exc
+            )
 
 
 @router.post("/api/library/add-to-arr")
@@ -539,6 +668,7 @@ async def add_to_arr(request: Request) -> JSONResponse:
         return JSONResponse({"error": "anilist_id required"}, status_code=400)
 
     tvdb_id_override: int | None = int(body["tvdb_id"]) if body.get("tvdb_id") else None
+    tmdb_id_override: int | None = int(body["tmdb_id"]) if body.get("tmdb_id") else None
     monitor_strategy: str = str(body.get("monitor_strategy") or "future")
     valid_strategies = {
         "future",
@@ -576,6 +706,11 @@ async def add_to_arr(request: Request) -> JSONResponse:
         anilist_client=anilist_client,
         sonarr_client=sonarr_client,
         radarr_client=radarr_client,
+        config=config,
+        app_state=request.app.state,
+        # Everything after the add itself runs in the background — see
+        # _post_add_followups.
+        defer_path_sync=True,
     )
 
     media: dict[str, Any] = {"title": {"romaji": anilist_title}, "synonyms": []}
@@ -591,48 +726,28 @@ async def add_to_arr(request: Request) -> JSONResponse:
             search_immediately=True,
             tags=tags,
             tvdb_id_override=tvdb_id_override,
+            tmdb_id_override=tmdb_id_override,
         )
 
-        # Auto-link sequels/prequels that share the same Sonarr series
-        if (
-            result.ok
-            and result.arr_id
-            and result.external_id
-            and result.service == "sonarr"
-        ):
+        # Everything below the add — alt titles, sibling linking, path sync —
+        # costs several *arr and AniList round trips and doesn't change the
+        # answer the user is waiting for.  Doing it inline left the confirm
+        # dialog sitting on "Adding…" long after Sonarr had already accepted
+        # the series, so it runs in the background instead.
+        if result.ok and result.arr_id:
             spawn_background_task(
                 request.app.state,
-                _auto_link_sonarr_siblings(
+                _post_add_followups(
                     db=db,
                     anilist_client=anilist_client,
-                    root_anilist_id=anilist_id,
-                    tvdb_id=result.external_id,
-                    sonarr_id=result.arr_id,
-                    sonarr_url=config.sonarr.url,
-                    sonarr_api_key=config.sonarr.api_key,
+                    config=config,
+                    app_state=request.app.state,
+                    anilist_id=anilist_id,
+                    service=result.service,
+                    arr_id=result.arr_id,
+                    external_id=result.external_id,
                 ),
             )
-
-        # Push all AniList title variants to Sonarr so it can find releases
-        if result.ok and result.arr_id and sonarr_client:
-            try:
-                media_data = await anilist_client._execute_query(
-                    GET_FULL_MEDIA_QUERY, {"id": anilist_id}
-                )
-                full_media = media_data.get("Media", {})
-                if full_media:
-                    alt_titles = [
-                        t for t in build_title_chain(full_media) if t and len(t) > 2
-                    ]
-                    if alt_titles:
-                        await sonarr_client.push_alt_titles(result.arr_id, alt_titles)
-                        logger.info(
-                            "Pushed %d alt titles to Sonarr for anilist_id=%d",
-                            len(alt_titles),
-                            anilist_id,
-                        )
-            except Exception as exc:
-                logger.warning("Could not push alt titles to Sonarr: %s", exc)
     finally:
         if sonarr_client:
             await sonarr_client.close()
@@ -990,22 +1105,43 @@ async def resolve_arr_match(request: Request) -> JSONResponse:
     anilist_format, anilist_title = await _get_entry_info(db, anilist_id)
     is_movie = is_movie_format(anilist_format)
 
+    # An id confirmed in the disambiguation picker skips resolution, so a
+    # hand-picked match still gets the same preview — siblings, season
+    # placement, link-vs-add — as an auto-resolved one.
+    tvdb_override = request.query_params.get("tvdb_id")
+    tmdb_override = request.query_params.get("tmdb_id")
+    if tmdb_override:
+        # The picker chose a movie, whatever format AniList reports.
+        is_movie = True
+
     if is_movie:
         if not config.radarr.url or not config.radarr.api_key:
             return JSONResponse({"error": "Radarr not configured"}, status_code=503)
 
         from src.Utils.NamingTranslator import resolve_tmdb_id
 
-        tmdb_id = await resolve_tmdb_id(anilist_id, anilist_client)
+        client_r = RadarrClient(url=config.radarr.url, api_key=config.radarr.api_key)
+        tmdb_id = (
+            int(tmdb_override)
+            if tmdb_override
+            else await resolve_tmdb_id(anilist_id, anilist_client)
+        )
         if not tmdb_id:
+            try:
+                candidates = await _radarr_title_candidates(
+                    client_r, anilist_client, anilist_id, anilist_title
+                )
+            finally:
+                await client_r.close()
             return JSONResponse(
                 {
                     "resolved": False,
-                    "error": f"Could not resolve TMDB ID for {anilist_title!r}",
+                    "needs_disambiguation": True,
+                    "service": "radarr",
+                    "candidates": candidates,
                 }
             )
 
-        client_r = RadarrClient(url=config.radarr.url, api_key=config.radarr.api_key)
         try:
             result = await client_r.lookup_movie_by_tmdb(tmdb_id)
             if not result:
@@ -1055,8 +1191,12 @@ async def resolve_arr_match(request: Request) -> JSONResponse:
 
     client_s = SonarrClient(url=config.sonarr.url, api_key=config.sonarr.api_key)
     try:
-        tvdb_id = await resolve_tvdb_id(anilist_id, anilist_client)
-        candidates: list[dict] = []
+        tvdb_id = (
+            int(tvdb_override)
+            if tvdb_override
+            else await resolve_tvdb_id(anilist_id, anilist_client)
+        )
+        candidates = []
 
         if not tvdb_id:
             # Try walking PREQUEL relations to find root entry with TVDB link
@@ -1197,21 +1337,34 @@ async def resolve_arr_match_stream(request: Request) -> StreamingResponse:
 
                 from src.Utils.NamingTranslator import resolve_tmdb_id
 
+                client_r = RadarrClient(
+                    url=config.radarr.url, api_key=config.radarr.api_key
+                )
                 tmdb_id = await resolve_tmdb_id(anilist_id, anilist_client)
                 if not tmdb_id:
+                    # No TMDB link on AniList \u2014 offer manual Radarr disambiguation
+                    yield _sse(
+                        "status",
+                        {"text": "Searching Radarr by title variants\u2026"},
+                    )
+                    try:
+                        candidates = await _radarr_title_candidates(
+                            client_r, anilist_client, anilist_id, anilist_title
+                        )
+                    finally:
+                        await client_r.close()
                     yield _sse(
                         "result",
                         {
                             "resolved": False,
-                            "error": f"Could not resolve TMDB ID for {anilist_title!r}",
+                            "needs_disambiguation": True,
+                            "service": "radarr",
+                            "candidates": candidates,
                         },
                     )
                     return
 
                 yield _sse("status", {"text": "Looking up in Radarr\u2026"})
-                client_r = RadarrClient(
-                    url=config.radarr.url, api_key=config.radarr.api_key
-                )
                 try:
                     result = await client_r.lookup_movie_by_tmdb(tmdb_id)
                     if not result:
@@ -1650,13 +1803,15 @@ async def push_alt_titles_endpoint(request: Request) -> JSONResponse:
         await client.close()
 
 
+@router.post("/api/library/unlink-from-arr")
 @router.post("/api/library/unlink-from-sonarr")
-async def unlink_from_sonarr(request: Request) -> JSONResponse:
-    """Remove our DB mapping for an AniList entry regardless of Sonarr state.
+async def unlink_from_arr(request: Request) -> JSONResponse:
+    """Drop our Sonarr/Radarr mapping for an AniList entry.
 
-    Use when the Sonarr series was deleted externally and the entry is stuck
-    showing as 'in Sonarr' with no way to re-add it.  Does NOT call the
-    Sonarr API — purely a local DB cleanup.
+    Undoes a wrong match — the entry goes back to offering "+ Add" so it can be
+    re-linked to the right series — and unsticks an entry whose *arr item was
+    deleted externally.  Purely a local DB cleanup: it does NOT remove anything
+    from Sonarr or Radarr.
 
     Body JSON: { anilist_id }
     """
@@ -1666,26 +1821,49 @@ async def unlink_from_sonarr(request: Request) -> JSONResponse:
     if not anilist_id:
         return JSONResponse({"error": "anilist_id required"}, status_code=400)
 
+    unlinked: list[str] = []
+
     # Look up sonarr_id before deleting so we can clean season mappings too
     row = await db.fetch_one(
         "SELECT sonarr_id FROM anilist_sonarr_mapping WHERE anilist_id=?",
         (anilist_id,),
     )
-    sonarr_id = row["sonarr_id"] if row else None
-
-    await db.execute(
-        "DELETE FROM anilist_sonarr_mapping WHERE anilist_id=?", (anilist_id,)
-    )
-    if sonarr_id:
+    if row:
+        sonarr_id = row["sonarr_id"]
         await db.execute(
-            "DELETE FROM anilist_sonarr_season_mapping"
-            " WHERE sonarr_id=? AND anilist_id=?",
-            (sonarr_id, anilist_id),
+            "DELETE FROM anilist_sonarr_mapping WHERE anilist_id=?", (anilist_id,)
         )
-    logger.info(
-        "Unlinked anilist_id=%d from Sonarr (sonarr_id=%s)", anilist_id, sonarr_id
+        if sonarr_id:
+            await db.execute(
+                "DELETE FROM anilist_sonarr_season_mapping"
+                " WHERE sonarr_id=? AND anilist_id=?",
+                (sonarr_id, anilist_id),
+            )
+        unlinked.append("sonarr")
+        logger.info(
+            "Unlinked anilist_id=%d from Sonarr (sonarr_id=%s)", anilist_id, sonarr_id
+        )
+
+    row = await db.fetch_one(
+        "SELECT radarr_id FROM anilist_radarr_mapping WHERE anilist_id=?",
+        (anilist_id,),
     )
-    return JSONResponse({"ok": True, "anilist_id": anilist_id})
+    if row:
+        await db.execute(
+            "DELETE FROM anilist_radarr_mapping WHERE anilist_id=?", (anilist_id,)
+        )
+        unlinked.append("radarr")
+        logger.info(
+            "Unlinked anilist_id=%d from Radarr (radarr_id=%s)",
+            anilist_id,
+            row["radarr_id"],
+        )
+
+    # A wrong match may also sit in the 24h failed-resolution cache; clear it so
+    # re-adding isn't silently skipped.
+    await db.execute("DELETE FROM anilist_arr_skip WHERE anilist_id=?", (anilist_id,))
+
+    return JSONResponse({"ok": True, "anilist_id": anilist_id, "unlinked": unlinked})
 
 
 @router.post("/api/library/backfill-sonarr-siblings")
@@ -1773,6 +1951,7 @@ async def backfill_sonarr_siblings(request: Request) -> JSONResponse:
 
     linked: list[dict] = []
     skipped_no_tvdb: list[int] = []
+    ranges_written = 0
 
     for sonarr_id, members in groups.items():
         # Use the first member's anilist_id and tvdb_id as chain root
@@ -1795,34 +1974,16 @@ async def backfill_sonarr_siblings(request: Request) -> JSONResponse:
             )
             continue
 
-        # Season assignment: 1:1 when counts match, else cumulative episode-range
         sonarr_seasons = sonarr_seasons_map.get(sonarr_id, [])
         sonarr_season_totals = sonarr_season_totals_map.get(sonarr_id, {})
-        season_map: dict[int, int | None] = {}
-        if sonarr_seasons and len(chain) == len(sonarr_seasons):
-            for idx, aid in enumerate(chain):
-                season_map[aid] = sonarr_seasons[idx]
-        elif sonarr_seasons and all(episode_counts.get(aid) for aid in chain):
-            sonarr_ranges: list[tuple[int, int, int]] = []
-            cum = 1
-            for sn in sonarr_seasons:
-                total = sonarr_season_totals.get(sn, 0)
-                if total > 0:
-                    sonarr_ranges.append((cum, cum + total - 1, sn))
-                    cum += total
-            anilist_start = 1
-            for aid in chain:
-                eps = episode_counts.get(aid) or 0
-                assigned: int | None = None
-                for s_start, s_end, sn in sonarr_ranges:
-                    if anilist_start <= s_end:
-                        assigned = sn
-                        break
-                season_map[aid] = assigned
-                anilist_start += eps
-        else:
-            for aid in chain:
-                season_map[aid] = None
+        season_map, episode_ranges = assign_season_ranges(
+            chain, episode_counts, sonarr_seasons, sonarr_season_totals
+        )
+        # The backfill is also where a series linked before episode ranges
+        # existed gets them, so store the ranges too — not just the season.
+        ranges_written += await persist_season_ranges(
+            db, sonarr_id, season_map, episode_ranges, chain
+        )
 
         # Update season on already-mapped entries that lack it
         for aid in chain:
@@ -1901,6 +2062,7 @@ async def backfill_sonarr_siblings(request: Request) -> JSONResponse:
             "total_season_updates": len(
                 [x for x in linked if x["action"] == "season_updated"]
             ),
+            "total_ranges_written": ranges_written,
             "skipped_no_tvdb": skipped_no_tvdb,
         }
     )

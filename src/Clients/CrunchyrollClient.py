@@ -15,6 +15,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -24,6 +26,12 @@ logger = logging.getLogger(__name__)
 
 CRUNCHYROLL_BASE = "https://www.crunchyroll.com"
 LOGIN_URL = f"{CRUNCHYROLL_BASE}/login"
+
+# Chrome gets a throwaway profile per launch (see _prepare_chrome_profile).
+_CHROME_PROFILE_PREFIX = "anilist-link-chrome-"
+# Only profiles older than this are swept, so a concurrent run is never
+# pulled out from under.
+_STALE_PROFILE_AGE_SECONDS = 2 * 60 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +83,7 @@ class CrunchyrollClient:
         self._db = db  # DatabaseManager for session persistence
         self._loop: asyncio.AbstractEventLoop | None = None
         self._driver: Any = None
+        self._profile_dir: str = ""
         self._access_token: str = ""
         self._account_id: str = ""
         self._device_id: str = ""
@@ -118,6 +127,9 @@ class CrunchyrollClient:
             except Exception:
                 logger.debug("Error closing browser", exc_info=True)
             self._driver = None
+        if self._profile_dir:
+            shutil.rmtree(self._profile_dir, ignore_errors=True)
+            self._profile_dir = ""
         self._access_token = ""
         self._account_id = ""
 
@@ -702,24 +714,174 @@ class CrunchyrollClient:
     # Driver setup (Docker-compatible, ported with all flags)
     # ==================================================================
 
-    def _setup_driver(self) -> None:
-        """Initialize undetected Chrome WebDriver with Docker-compatible flags."""
-        import subprocess
+    @staticmethod
+    def _ensure_browser_home() -> str:
+        """Return a writable base dir for driver state and point HOME/XDG at it.
 
-        import undetected_chromedriver as uc
+        The container runs as a non-root user (PUID/PGID) whose HOME is often
+        unset or ``/``.  ``undetected_chromedriver`` resolves its patched-driver
+        cache via ``appdirs``/XDG, which then targets ``/.local`` and fails with
+        ``PermissionError``.  Redirecting these to a writable location
+        (``/config`` in the container, a temp dir otherwise) fixes driver setup.
 
-        options = uc.ChromeOptions()
+        This base holds the *driver* cache, which is worth persisting between
+        runs.  Chrome's own profile deliberately lives elsewhere -- see
+        :meth:`_prepare_chrome_profile`.
+        """
+        base: str | None = None
+        for candidate in ("/config", os.environ.get("HOME", "")):
+            if candidate and os.path.isdir(candidate) and os.access(candidate, os.W_OK):
+                base = os.path.join(candidate, ".anilist-link-browser")
+                break
+        if base is None:
+            base = os.path.join(tempfile.gettempdir(), "anilist-link-browser")
 
-        _chrome_candidates = [
+        for sub in ("", "cache", "data", "config"):
+            try:
+                os.makedirs(os.path.join(base, sub) if sub else base, exist_ok=True)
+            except OSError as exc:  # pragma: no cover - defensive
+                logger.warning("Could not create browser dir %s: %s", base, exc)
+
+        os.environ["HOME"] = base
+        os.environ["XDG_CACHE_HOME"] = os.path.join(base, "cache")
+        os.environ["XDG_DATA_HOME"] = os.path.join(base, "data")
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(base, "config")
+        return base
+
+    @staticmethod
+    def _clear_singleton_locks(profile_dir: str) -> None:
+        """Remove Chrome's singleton lock files from a profile directory.
+
+        ``SingletonLock``/``SingletonSocket``/``SingletonCookie`` are how Chrome
+        detects an already-running instance for a profile.  If a previous Chrome
+        was killed uncleanly they survive, and the next launch hands its command
+        line to the (dead) "existing" instance and exits immediately -- which
+        surfaces as ``SessionNotCreatedException: ... chrome not reachable``.
+        """
+        for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            path = os.path.join(profile_dir, name)
+            try:
+                if os.path.islink(path) or os.path.exists(path):
+                    os.unlink(path)
+                    logger.debug("Removed stale Chrome lock %s", path)
+            except OSError as exc:  # pragma: no cover - defensive
+                logger.debug("Could not remove %s: %s", path, exc)
+
+    @staticmethod
+    def _sweep_stale_profiles(parent: str) -> None:
+        """Delete leftover per-launch profile dirs from earlier runs.
+
+        Only directories older than :data:`_STALE_PROFILE_AGE_SECONDS` are
+        removed, so a concurrently running sync is never pulled out from under.
+        """
+        cutoff = time.time() - _STALE_PROFILE_AGE_SECONDS
+        try:
+            names = os.listdir(parent)
+        except OSError:  # pragma: no cover - defensive
+            return
+        for name in names:
+            if not name.startswith(_CHROME_PROFILE_PREFIX):
+                continue
+            path = os.path.join(parent, name)
+            try:
+                if not os.path.isdir(path) or os.path.getmtime(path) > cutoff:
+                    continue
+            except OSError:  # pragma: no cover - defensive
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            logger.debug("Swept stale Chrome profile %s", path)
+
+    @staticmethod
+    def _purge_legacy_profile(browser_home: str) -> None:
+        """Remove the old fixed profile directory from the config volume.
+
+        Earlier versions pinned Chrome to a single permanent profile under the
+        browser home.  On a mounted config volume (a FUSE/shfs share on Unraid)
+        that directory accumulates stale locks and is re-``chown``ed on every
+        container start.  It is disposable browser state, so drop it once.
+        """
+        legacy = os.path.join(browser_home, "chrome-profile")
+        if not os.path.isdir(legacy):
+            return
+        try:
+            shutil.rmtree(legacy)
+            logger.info("Removed legacy Chrome profile directory %s", legacy)
+        except OSError as exc:  # pragma: no cover - defensive
+            logger.warning("Could not remove legacy profile %s: %s", legacy, exc)
+
+    @classmethod
+    def _prepare_chrome_profile(cls, browser_home: str) -> str:
+        """Return a fresh, local, lock-free Chrome profile directory.
+
+        Chrome's profile needs real file locking and is cheap to recreate, so it
+        gets a new directory per launch on local disk rather than one permanent
+        directory on the mounted config volume.  Nothing of value is lost: the
+        Crunchyroll session is persisted in the ``cr_session_cache`` table, not
+        in the browser profile.
+        """
+        cls._purge_legacy_profile(browser_home)
+
+        parent = tempfile.gettempdir()
+        if not (os.path.isdir(parent) and os.access(parent, os.W_OK)):
+            parent = browser_home
+        cls._sweep_stale_profiles(parent)
+
+        profile_dir = tempfile.mkdtemp(prefix=_CHROME_PROFILE_PREFIX, dir=parent)
+        cls._clear_singleton_locks(profile_dir)
+        return profile_dir
+
+    @staticmethod
+    def _find_chrome_binary() -> str:
+        """Return the path to a usable Chrome/Chromium binary, or ""."""
+        candidates = [
             os.environ.get("CHROME_BIN", ""),
             "/usr/bin/google-chrome",
+            "/usr/bin/chromium",
             "/usr/bin/chromium-browser",
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
         ]
-        chrome_binary = next(
-            (p for p in _chrome_candidates if p and os.path.exists(p)), ""
-        )
+        return next((p for p in candidates if p and os.path.exists(p)), "")
+
+    @staticmethod
+    def _detect_chrome_major_version(chrome_binary: str) -> int | None:
+        """Return Chrome's major version, or ``None`` if it cannot be read."""
+        import subprocess
+
+        cmd = [chrome_binary or "google-chrome", "--version"]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning("Could not run '%s': %s", " ".join(cmd), exc)
+            return None
+
+        output = result.stdout.strip() or result.stderr.strip()
+        # Match the first numeric version (e.g. "146.0.7680.177") so that
+        # Debian build suffixes like "(bookworm)" are ignored.
+        version_match = re.search(r"(\d+)\.\d+", output)
+        if not version_match:
+            logger.warning("Could not parse Chrome version from: %r", output)
+            return None
+
+        chrome_version = int(version_match.group(1))
+        logger.info("Detected Chrome major version: %s", chrome_version)
+        return chrome_version
+
+    def _build_chrome_options(self, profile_dir: str, chrome_binary: str) -> Any:
+        """Build a FRESH ``ChromeOptions`` for a single launch attempt.
+
+        ``undetected_chromedriver`` stamps ``options._session`` onto the object
+        it is handed and refuses to accept it a second time ("you cannot reuse
+        the ChromeOptions object"), so a retry must never pass the same
+        instance back in.
+        """
+        import undetected_chromedriver as uc
+
+        options = uc.ChromeOptions()
+
+        # Keep Chrome's profile in this launch's throwaway directory.
+        options.add_argument(f"--user-data-dir={profile_dir}")
+
         if chrome_binary:
             options.binary_location = chrome_binary
             logger.info("Using Chrome binary: %s", chrome_binary)
@@ -746,13 +908,18 @@ class CrunchyrollClient:
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--disable-extensions")
 
-        # Stability improvements for Docker
+        # Stability improvements for Docker.  Chrome keeps only the LAST value
+        # of a repeated switch, so every --disable-features flag has to be a
+        # single combined argument.
         options.add_argument("--disable-background-networking")
         options.add_argument("--disable-background-timer-throttling")
         options.add_argument("--disable-backgrounding-occluded-windows")
         options.add_argument("--disable-breakpad")
         options.add_argument("--disable-component-extensions-with-background-pages")
-        options.add_argument("--disable-features=TranslateUI,BlinkGenPropertyTrees")
+        options.add_argument(
+            "--disable-features=TranslateUI,BlinkGenPropertyTrees,"
+            "VizDisplayCompositor"
+        )
         options.add_argument("--disable-ipc-flooding-protection")
         options.add_argument("--disable-renderer-backgrounding")
         options.add_argument("--enable-features=NetworkService,NetworkServiceInProcess")
@@ -761,42 +928,89 @@ class CrunchyrollClient:
         options.add_argument("--metrics-recording-only")
         options.add_argument("--mute-audio")
 
-        # Memory and performance
-        options.add_argument("--disable-features=VizDisplayCompositor")
-        options.add_argument("--remote-debugging-port=9222")
+        # NB: deliberately no --remote-debugging-port.  undetected_chromedriver
+        # picks a free port, appends its own flag and then polls that port; a
+        # hardcoded one collides with that choice and can leave the driver
+        # waiting on a port Chrome never opened ("chrome not reachable").
+
+        return options
+
+    def _teardown_driver(self) -> None:
+        """Quit a (possibly half-built) driver, swallowing any error."""
+        driver, self._driver = self._driver, None
+        if driver is None:
+            return
+        try:
+            driver.quit()
+        except Exception:  # pragma: no cover - best effort
+            logger.debug("Error quitting Chrome driver", exc_info=True)
+
+    def _setup_driver(self) -> None:
+        """Initialize undetected Chrome WebDriver with Docker-compatible flags."""
+        # Redirect HOME/XDG to a writable location BEFORE importing uc, so the
+        # driver-patcher cache lands somewhere writable.
+        browser_home = self._ensure_browser_home()
+
+        import undetected_chromedriver as uc
+
+        # undetected_chromedriver caches its patched driver under
+        # ``Patcher.data_path`` -- a CLASS attribute resolved from HOME via
+        # ``expanduser("~/...")`` AT IMPORT TIME.  If HOME was ever empty at
+        # import, that frozen value becomes ``/.local`` and every driver launch
+        # fails with PermissionError.  Pin it explicitly to our writable base so
+        # the outcome no longer depends on when/where uc was first imported.
+        uc_cache = os.path.join(browser_home, "uc-driver")
+        try:
+            os.makedirs(uc_cache, exist_ok=True)
+            uc.Patcher.data_path = uc_cache
+        except OSError as exc:  # pragma: no cover - defensive
+            logger.warning("Could not set undetected_chromedriver cache: %s", exc)
+
+        chrome_binary = self._find_chrome_binary()
+        chrome_version = self._detect_chrome_major_version(chrome_binary)
+
+        attempts: list[tuple[str, dict[str, Any]]] = []
+        if chrome_version is not None:
+            attempts.append(
+                (
+                    f"driver pinned to Chrome {chrome_version}",
+                    {"version_main": chrome_version},
+                )
+            )
+        attempts.append(("driver version auto-detected", {}))
+
+        last_exc: Exception | None = None
+        for description, kwargs in attempts:
+            # Every attempt gets its own profile AND its own options object;
+            # neither can be reused after a failed launch.
+            profile_dir = self._prepare_chrome_profile(browser_home)
+            options = self._build_chrome_options(profile_dir, chrome_binary)
+            try:
+                self._driver = uc.Chrome(options=options, use_subprocess=True, **kwargs)
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("Chrome launch failed (%s): %s", description, exc)
+                self._teardown_driver()
+                shutil.rmtree(profile_dir, ignore_errors=True)
+                continue
+            self._profile_dir = profile_dir
+            logger.info("Chrome started (%s), profile %s", description, profile_dir)
+            break
+        else:
+            raise RuntimeError(
+                "Could not start Chrome for Crunchyroll authentication"
+            ) from last_exc
 
         try:
-            cmd = (
-                [chrome_binary, "--version"]
-                if chrome_binary
-                else ["google-chrome", "--version"]
+            # Anti-detection script
+            self._driver.execute_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             )
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            chrome_version_output = result.stdout.strip() or result.stderr.strip()
-            # Use regex to find the first numeric version (e.g. "146.0.7680.177")
-            # so that Debian build suffixes like "(bookworm)" are ignored.
-            version_match = re.search(r"(\d+)\.\d+", chrome_version_output)
-            if not version_match:
-                raise ValueError(
-                    f"Could not parse Chrome version from: {chrome_version_output!r}"
-                )
-            chrome_version = version_match.group(1)
-            logger.info("Detected Chrome major version: %s", chrome_version)
-            self._driver = uc.Chrome(
-                options=options,
-                version_main=int(chrome_version),
-                driver_executable_path=None,
-                use_subprocess=True,
-            )
+            self._driver.set_page_load_timeout(60)
         except Exception:
-            logger.warning("Could not detect Chrome version, auto-detecting...")
-            self._driver = uc.Chrome(options=options, use_subprocess=True)
-
-        # Anti-detection script
-        self._driver.execute_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
-        self._driver.set_page_load_timeout(60)
+            # Never leak the browser process if post-launch setup fails.
+            self._teardown_driver()
+            raise
         logger.info("Chrome driver setup completed")
 
     # ==================================================================
