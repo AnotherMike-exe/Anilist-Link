@@ -390,6 +390,18 @@ def test_unknown_quality_is_recognised_in_every_shape() -> None:
     assert _is_unknown_quality({"quality": {"id": 6, "name": "Bluray-1080p"}}) is False
 
 
+def test_resolution_is_read_from_the_string_the_api_actually_returns() -> None:
+    """MediaInfoResource has no height field — it renders one "1920x1080"."""
+    assert _resolution_of({"resolution": "1920x1080"}) == 1080
+    assert _resolution_of({"resolution": "3840x2160"}) == 2160
+    assert _resolution_of({"resolution": "1280x720"}) == 720
+    assert _resolution_of({"resolution": "1920x1076"}) == 1080
+    assert _resolution_of({"resolution": "1440x1080"}) == 1080
+    assert _resolution_of({"resolution": ""}) == 0
+    assert _resolution_of({"resolution": "unknown"}) == 0
+    assert _resolution_of({"resolution": "1920xWIDE"}) == 0
+
+
 def test_real_heights_round_to_the_resolution_sonarr_names() -> None:
     """Anime is full of 1076p and 810p encodes; they are still 1080p and 720p."""
     assert _resolution_of({"height": 1080}) == 1080
@@ -400,6 +412,7 @@ def test_real_heights_round_to_the_resolution_sonarr_names() -> None:
     assert _resolution_of({"height": 0}) == 0
     assert _resolution_of(None) == 0
     assert _resolution_of({"height": "not a number"}) == 0
+    assert _resolution_of({}) == 0
 
 
 def test_quality_is_borrowed_from_a_sibling_at_the_same_resolution() -> None:
@@ -463,13 +476,13 @@ async def test_backfill_sets_quality_on_the_imported_files_only() -> None:
             "quality": {
                 "quality": {"id": 6, "name": "Bluray-1080p", "resolution": 1080}
             },
-            "mediaInfo": {"height": 1080},
+            "mediaInfo": {"resolution": "1920x1080"},
         },
         {
             "id": 502,
             "path": ours,
             "quality": {"quality": {"id": 0, "name": "Unknown", "resolution": 0}},
-            "mediaInfo": {"height": 1080},
+            "mediaInfo": {"resolution": "1920x1080"},
         },
     ]
     client = _sonarr([], [])
@@ -549,7 +562,7 @@ def _registered(ep_number: int, file_id: int, quality: dict[str, Any] | None):
         "id": file_id,
         "path": f"{SERIES_PATH}/Season 02/GATE - S02E{ep_number - 12:02d}.mkv",
         "quality": quality,
-        "mediaInfo": {"height": 1080},
+        "mediaInfo": {"resolution": "1920x1080"},
     }
     return ep, f
 
@@ -613,7 +626,7 @@ async def test_apply_with_nothing_to_import_still_fixes_quality() -> None:
         "id": 800,
         "path": f"{SERIES_PATH}/Season 01/GATE - S01E01.mkv",
         "quality": good,
-        "mediaInfo": {"height": 1080},
+        "mediaInfo": {"resolution": "1920x1080"},
     }
     client = _sonarr([], [ep13], episode_files=[sibling, f13])
     sent: dict[str, Any] = {}

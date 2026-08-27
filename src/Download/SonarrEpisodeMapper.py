@@ -93,15 +93,36 @@ def _is_unknown_quality(quality: dict[str, Any] | None) -> bool:
     )
 
 
-def _resolution_of(media_info: dict[str, Any] | None) -> int:
-    """Round a file's real pixel height to the resolution Sonarr names it by."""
+def _media_height(media_info: dict[str, Any] | None) -> int:
+    """The pixel height Sonarr recorded for a file, however it reports it.
+
+    The API resource carries no height of its own — it renders one string,
+    ``"1920x1080"``, from the width and height it holds internally. The bare
+    keys are still read first in case a caller has the internal shape.
+    """
     if not media_info:
         return 0
-    height = media_info.get("height") or 0
-    try:
-        height = int(height)
-    except (TypeError, ValueError):
-        return 0
+    for key in ("height", "videoHeight"):
+        try:
+            value = int(media_info.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+
+    resolution = str(media_info.get("resolution") or "")
+    if "x" in resolution.lower():
+        tail = resolution.lower().split("x")[-1].strip()
+        try:
+            return int(tail)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _resolution_of(media_info: dict[str, Any] | None) -> int:
+    """Round a file's real pixel height to the resolution Sonarr names it by."""
+    height = _media_height(media_info)
     if height <= 0:
         return 0
     for floor, resolution in _STANDARD_RESOLUTIONS:
@@ -665,7 +686,11 @@ class SonarrEpisodeMapper:
                     result["unresolved"].append(
                         {
                             "file": os.path.basename(f.get("path") or ""),
-                            "reason": "Sonarr has no media info height for this file",
+                            "reason": (
+                                "Sonarr has no media info resolution for this"
+                                " file yet — try again after it finishes"
+                                " analysing the file"
+                            ),
                         }
                     )
                     continue
