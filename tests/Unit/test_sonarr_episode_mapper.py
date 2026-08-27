@@ -11,6 +11,10 @@ from src.Download.SeasonRangeMapper import RebuildResult
 from src.Download.SonarrEpisodeMapper import (
     MappingError,
     SonarrEpisodeMapper,
+    _donor_quality,
+    _is_unknown_quality,
+    _quality_from_definitions,
+    _resolution_of,
     _under,
 )
 from src.Utils.Config import AppConfig, SonarrConfig
@@ -363,3 +367,156 @@ async def test_episode_that_already_has_a_file_is_skipped() -> None:
 
     assert [m["sonarr_episode"] for m in plan["matched"]] == [14]
     assert "already has a file" in plan["skipped"][0]["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Quality backfill
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_quality_is_recognised_in_every_shape() -> None:
+    assert _is_unknown_quality(None) is True
+    assert _is_unknown_quality({}) is True
+    assert _is_unknown_quality({"quality": {"id": 0, "name": "Unknown"}}) is True
+    assert _is_unknown_quality({"quality": {"id": 3, "name": "unknown"}}) is True
+    assert _is_unknown_quality({"quality": {"id": 6, "name": "Bluray-1080p"}}) is False
+
+
+def test_real_heights_round_to_the_resolution_sonarr_names() -> None:
+    """Anime is full of 1076p and 810p encodes; they are still 1080p and 720p."""
+    assert _resolution_of({"height": 1080}) == 1080
+    assert _resolution_of({"height": 1076}) == 1080
+    assert _resolution_of({"height": 2160}) == 2160
+    assert _resolution_of({"height": 810}) == 720
+    assert _resolution_of({"height": 480}) == 480
+    assert _resolution_of({"height": 0}) == 0
+    assert _resolution_of(None) == 0
+    assert _resolution_of({"height": "not a number"}) == 0
+
+
+def test_quality_is_borrowed_from_a_sibling_at_the_same_resolution() -> None:
+    """The rest of the series came from the same place — use its source."""
+    files = [
+        {"quality": {"quality": {"id": 0, "name": "Unknown", "resolution": 0}}},
+        {"quality": {"quality": {"id": 4, "name": "HDTV-720p", "resolution": 720}}},
+        {"quality": {"quality": {"id": 6, "name": "Bluray-1080p", "resolution": 1080}}},
+    ]
+    got = _donor_quality(files, 1080)
+    assert got is not None
+    assert got["quality"]["name"] == "Bluray-1080p"
+    assert _donor_quality(files, 720)["quality"]["name"] == "HDTV-720p"
+    assert _donor_quality(files, 2160) is None
+    assert _donor_quality(files, 0) is None
+
+
+def test_definition_fallback_prefers_web_over_other_sources() -> None:
+    definitions = [
+        {
+            "quality": {
+                "id": 9,
+                "name": "HDTV-1080p",
+                "source": "television",
+                "resolution": 1080,
+            }
+        },
+        {
+            "quality": {
+                "id": 3,
+                "name": "WEBDL-1080p",
+                "source": "webdl",
+                "resolution": 1080,
+            }
+        },
+        {
+            "quality": {
+                "id": 7,
+                "name": "Bluray-1080p",
+                "source": "bluray",
+                "resolution": 1080,
+            }
+        },
+    ]
+    got = _quality_from_definitions(definitions, 1080)
+    assert got["quality"]["name"] == "WEBDL-1080p"
+    assert got["revision"] == {"version": 1, "real": 0, "isRepack": False}
+    assert _quality_from_definitions(definitions, 2160) is None
+
+
+@pytest.mark.asyncio
+async def test_backfill_sets_quality_on_the_imported_files_only() -> None:
+    """Files that already have a quality, and files we didn't import, are
+    left exactly as they are."""
+    ours = SERIES_PATH + "/Season 02/GATE - S02E01.mkv"
+    theirs = SERIES_PATH + "/Season 01/GATE - S01E01.mkv"
+    files = [
+        {
+            "id": 501,
+            "path": theirs,
+            "quality": {
+                "quality": {"id": 6, "name": "Bluray-1080p", "resolution": 1080}
+            },
+            "mediaInfo": {"height": 1080},
+        },
+        {
+            "id": 502,
+            "path": ours,
+            "quality": {"quality": {"id": 0, "name": "Unknown", "resolution": 0}},
+            "mediaInfo": {"height": 1080},
+        },
+    ]
+    client = _sonarr([], [])
+    sent: dict[str, Any] = {}
+
+    async def get_episode_files(sid: int) -> list[dict[str, Any]]:
+        return files
+
+    async def set_quality(ids: list[int], quality: dict[str, Any]) -> Any:
+        sent["ids"] = ids
+        sent["quality"] = quality
+        return {}
+
+    client.get_episode_files = get_episode_files
+    client.set_episode_files_quality = set_quality
+
+    mapper = SonarrEpisodeMapper(db=_db(), config=_config(), sonarr=client)
+    result = await mapper.backfill_quality(272, [ours], client=client)
+
+    assert result["updated"] == 1
+    assert sent["ids"] == [502]
+    assert sent["quality"]["quality"]["name"] == "Bluray-1080p"
+
+
+@pytest.mark.asyncio
+async def test_backfill_reports_a_file_with_no_media_info() -> None:
+    ours = SERIES_PATH + "/Season 02/GATE - S02E01.mkv"
+    files = [
+        {
+            "id": 502,
+            "path": ours,
+            "quality": {"quality": {"id": 0, "name": "Unknown", "resolution": 0}},
+            "mediaInfo": {},
+        }
+    ]
+    client = _sonarr([], [])
+    called: list[Any] = []
+
+    async def get_episode_files(sid: int) -> list[dict[str, Any]]:
+        return files
+
+    async def get_quality_definitions() -> list[dict[str, Any]]:
+        return []
+
+    async def set_quality(ids: list[int], quality: dict[str, Any]) -> Any:
+        called.append(ids)
+        return {}
+
+    client.get_episode_files = get_episode_files
+    client.get_quality_definitions = get_quality_definitions
+    client.set_episode_files_quality = set_quality
+
+    mapper = SonarrEpisodeMapper(db=_db(), config=_config(), sonarr=client)
+    result = await mapper.backfill_quality(272, [ours], client=client)
+
+    assert result["updated"] == 0
+    assert called == []
+    assert "media info" in result["unresolved"][0]["reason"]

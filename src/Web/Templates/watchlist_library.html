@@ -1822,9 +1822,17 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       });
       var d2 = await resp2.json();
       if (!d2.ok) { showToast(d2.error || 'Mapping failed', 'error'); return; }
+      var q = d2.quality || {};
+      var qNote = q.updated
+        ? ' Quality set on ' + q.updated + ' of them from their media info.'
+        : '';
+      if (q.unresolved && q.unresolved.length) {
+        qNote += ' Quality left unset on ' + q.unresolved.length + ' (' +
+                 q.unresolved[0].reason + ').';
+      }
       showToast(
-        'Sent ' + d2.imported + ' file' + (d2.imported === 1 ? '' : 's') +
-        ' to Sonarr. Give it a moment, then check whether the episodes still read as missing.',
+        'Registered ' + d2.imported + ' file' + (d2.imported === 1 ? '' : 's') +
+        ' with Sonarr.' + qNote,
         'success');
     } catch (e) {
       showToast('Mapping failed: ' + e.message, 'error');

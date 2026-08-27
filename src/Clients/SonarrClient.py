@@ -418,3 +418,28 @@ class SonarrClient(ServarrBaseClient):
         )
         resp.raise_for_status()
         return resp.json()
+
+    async def get_command(self, command_id: int) -> dict[str, Any] | None:
+        """Return a queued command's record, for polling until it completes."""
+        return await self._get_by_id("command", command_id)
+
+    async def get_quality_definitions(self) -> list[dict[str, Any]]:
+        """Return every quality Sonarr knows, each with its source and resolution."""
+        resp = await self._http.get(self._endpoint("qualitydefinition"))
+        resp.raise_for_status()
+        return resp.json()
+
+    async def set_episode_files_quality(
+        self, episode_file_ids: list[int], quality: dict[str, Any]
+    ) -> Any:
+        """Set the quality on existing episode files, leaving the files alone.
+
+        This is the bulk edit the "Manage Episodes" quality dropdown performs;
+        it rewrites the database record only.
+        """
+        resp = await self._http.put(
+            self._endpoint("episodefile/editor"),
+            json={"episodeFileIds": episode_file_ids, "quality": quality},
+        )
+        resp.raise_for_status()
+        return resp.json()
