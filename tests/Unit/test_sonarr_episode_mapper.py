@@ -56,7 +56,11 @@ def _db(
     return db
 
 
-def _sonarr(candidates: list[dict[str, Any]], episodes: list[dict[str, Any]]):
+def _sonarr(
+    candidates: list[dict[str, Any]],
+    episodes: list[dict[str, Any]],
+    episode_files: list[dict[str, Any]] | None = None,
+):
     client = MagicMock()
     sent: dict[str, Any] = {}
 
@@ -69,6 +73,9 @@ def _sonarr(candidates: list[dict[str, Any]], episodes: list[dict[str, Any]]):
     async def get_manual_import_candidates(*a: Any, **kw: Any) -> list[dict[str, Any]]:
         return candidates
 
+    async def get_episode_files(sid: int) -> list[dict[str, Any]]:
+        return episode_files or []
+
     async def manual_import(files: list[dict[str, Any]], import_mode: str = "Auto"):
         sent["files"] = files
         sent["import_mode"] = import_mode
@@ -80,6 +87,7 @@ def _sonarr(candidates: list[dict[str, Any]], episodes: list[dict[str, Any]]):
     client.get_series_by_id = get_series_by_id
     client.get_episodes = get_episodes
     client.get_manual_import_candidates = get_manual_import_candidates
+    client.get_episode_files = get_episode_files
     client.manual_import = manual_import
     client.close = close
     client.sent = sent
@@ -520,3 +528,113 @@ async def test_backfill_reports_a_file_with_no_media_info() -> None:
     assert result["updated"] == 0
     assert called == []
     assert "media info" in result["unresolved"][0]["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Re-running after the files are already registered
+# ---------------------------------------------------------------------------
+
+
+def _registered(ep_number: int, file_id: int, quality: dict[str, Any] | None):
+    """An episode Sonarr already has a file for, and that file's record."""
+    ep = {
+        "id": 1000 + ep_number,
+        "seasonNumber": 1,
+        "episodeNumber": ep_number,
+        "title": f"Ep {ep_number}",
+        "hasFile": True,
+        "episodeFileId": file_id,
+    }
+    f = {
+        "id": file_id,
+        "path": f"{SERIES_PATH}/Season 02/GATE - S02E{ep_number - 12:02d}.mkv",
+        "quality": quality,
+        "mediaInfo": {"height": 1080},
+    }
+    return ep, f
+
+
+@pytest.mark.asyncio
+async def test_rerun_finds_the_quality_gaps_sonarr_no_longer_offers() -> None:
+    """Sonarr leaves out files it already tracks, so a second Map Episodes run
+    sees no candidates at all — the quality still has to be reachable."""
+    unknown = {"quality": {"id": 0, "name": "Unknown", "resolution": 0}}
+    ep13, f13 = _registered(13, 901, unknown)
+    ep14, f14 = _registered(14, 902, unknown)
+    mapper = SonarrEpisodeMapper(
+        db=_db(season_row={"season_number": 1, "episode_start": 13, "episode_end": 24}),
+        config=_config(),
+        # No candidates: everything is already imported.
+        sonarr=_sonarr([], [ep13, ep14], episode_files=[f13, f14]),
+    )
+    plan = await mapper.plan(21364)
+
+    assert plan["matched"] == []
+    assert [g["file_id"] for g in plan["quality_gaps"]] == [901, 902]
+    assert plan["quality_gaps"][0]["sonarr_episode"] == 13
+
+
+@pytest.mark.asyncio
+async def test_rerun_reports_no_gap_when_quality_is_already_set() -> None:
+    good = {"quality": {"id": 6, "name": "Bluray-1080p", "resolution": 1080}}
+    ep13, f13 = _registered(13, 901, good)
+    mapper = SonarrEpisodeMapper(
+        db=_db(season_row={"season_number": 1, "episode_start": 13, "episode_end": 24}),
+        config=_config(),
+        sonarr=_sonarr([], [ep13], episode_files=[f13]),
+    )
+    plan = await mapper.plan(21364)
+    assert plan["quality_gaps"] == []
+
+
+@pytest.mark.asyncio
+async def test_gaps_ignore_episodes_outside_this_entrys_range() -> None:
+    """Cour one's files belong to the other AniList entry, not this one."""
+    unknown = {"quality": {"id": 0, "name": "Unknown", "resolution": 0}}
+    ep01, f01 = _registered(1, 800, unknown)
+    ep13, f13 = _registered(13, 901, unknown)
+    mapper = SonarrEpisodeMapper(
+        db=_db(season_row={"season_number": 1, "episode_start": 13, "episode_end": 24}),
+        config=_config(),
+        sonarr=_sonarr([], [ep01, ep13], episode_files=[f01, f13]),
+    )
+    plan = await mapper.plan(21364)
+    assert [g["file_id"] for g in plan["quality_gaps"]] == [901]
+
+
+@pytest.mark.asyncio
+async def test_apply_with_nothing_to_import_still_fixes_quality() -> None:
+    """The whole point: re-running Map Episodes repairs what it left behind."""
+    unknown = {"quality": {"id": 0, "name": "Unknown", "resolution": 0}}
+    good = {"quality": {"id": 6, "name": "Bluray-1080p", "resolution": 1080}}
+    ep13, f13 = _registered(13, 901, unknown)
+    # A sibling with a real quality to borrow the source from.
+    sibling = {
+        "id": 800,
+        "path": f"{SERIES_PATH}/Season 01/GATE - S01E01.mkv",
+        "quality": good,
+        "mediaInfo": {"height": 1080},
+    }
+    client = _sonarr([], [ep13], episode_files=[sibling, f13])
+    sent: dict[str, Any] = {}
+
+    async def set_quality(ids: list[int], quality: dict[str, Any]) -> Any:
+        sent["ids"] = ids
+        sent["quality"] = quality
+        return {}
+
+    client.set_episode_files_quality = set_quality
+
+    mapper = SonarrEpisodeMapper(
+        db=_db(season_row={"season_number": 1, "episode_start": 13, "episode_end": 24}),
+        config=_config(),
+        sonarr=client,
+    )
+    result = await mapper.apply(21364)
+
+    assert result["imported"] == 0
+    assert result["quality"]["updated"] == 1
+    assert sent["ids"] == [901]
+    assert sent["quality"]["quality"]["name"] == "Bluray-1080p"
+    # No import was attempted, so no command was issued.
+    assert "files" not in client.sent

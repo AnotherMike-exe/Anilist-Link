@@ -1789,12 +1789,43 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
 
       var matched = d.matched || [];
       var skipped = d.skipped || [];
+      var gaps = d.quality_gaps || [];
       if (!matched.length) {
+        // Already mapped, but an earlier run may have left the quality blank —
+        // Sonarr never offers a file it already tracks, so only this can fix it.
+        if (gaps.length) {
+          if (!confirm(
+            'Everything is already mapped, but ' + gaps.length + ' file' +
+            (gaps.length === 1 ? ' has' : 's have') + ' no quality set in Sonarr:\n\n  ' +
+            gaps.slice(0, 5).map(function(g) {
+              return 'S' + String(g.sonarr_season).padStart(2, '0') +
+                     'E' + String(g.sonarr_episode).padStart(2, '0') + '  ' + g.file;
+            }).join('\n  ') +
+            (gaps.length > 5 ? '\n  \u2026and ' + (gaps.length - 5) + ' more' : '') +
+            '\n\nSet it from each file\u2019s media info? Nothing on disk is touched.'
+          )) return;
+          setBusy(btn, 'Setting\u2026');
+          var respQ = await fetch('/api/import/entry/map-episodes', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({anilist_id: anilistId, dry_run: false})
+          });
+          var dq = await respQ.json();
+          if (!dq.ok) { showToast(dq.error || 'Quality update failed', 'error'); return; }
+          var q0 = dq.quality || {};
+          showToast(
+            q0.updated
+              ? 'Quality set on ' + q0.updated + ' file' + (q0.updated === 1 ? '' : 's') + '.'
+              : 'No quality could be set' +
+                (q0.unresolved && q0.unresolved.length ? ' (' + q0.unresolved[0].reason + ').' : '.'),
+            q0.updated ? 'success' : 'error');
+          return;
+        }
         var why = skipped.length
           ? '\n\nSonarr listed ' + skipped.length + ' file(s) it could not use:\n  ' +
-            skipped.slice(0, 5).map(function(s) { return s.file + ' — ' + s.reason; }).join('\n  ')
-          : '\n\nSonarr reported no unmatched files in this series folder, so there is nothing left to map.';
-        showToast('Nothing to map.' + why, 'error');
+            skipped.slice(0, 5).map(function(s) { return s.file + ' \u2014 ' + s.reason; }).join('\n  ')
+          : '\n\nEvery file for this entry is already registered with Sonarr, and all of them have a quality set.';
+        showToast('Nothing to do.' + why, skipped.length ? 'error' : 'success');
         return;
       }
 

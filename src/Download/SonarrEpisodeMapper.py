@@ -158,6 +158,46 @@ def _quality_from_definitions(
     }
 
 
+def _quality_gaps(
+    episodes: list[dict[str, Any]],
+    episode_files: list[dict[str, Any]],
+    season: int,
+    ep_start: int,
+    ep_end: int | None,
+) -> list[dict[str, Any]]:
+    """This entry's already-registered files that still have no quality.
+
+    A second run of the mapping will not find these: Sonarr leaves out files it
+    already tracks, so once a file is registered it never appears as an import
+    candidate again. Its quality can still be wrong, and this is what finds it.
+    """
+    files_by_id = {int(f["id"]): f for f in episode_files if f.get("id") is not None}
+    gaps: list[dict[str, Any]] = []
+    for ep in episodes:
+        try:
+            ep_season = int(ep["seasonNumber"])
+            ep_number = int(ep["episodeNumber"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if ep_season != season or ep_number < ep_start:
+            continue
+        if ep_end is not None and ep_number > ep_end:
+            continue
+        file_id = ep.get("episodeFileId") or 0
+        record = files_by_id.get(int(file_id)) if file_id else None
+        if not record or not _is_unknown_quality(record.get("quality")):
+            continue
+        gaps.append(
+            {
+                "file": os.path.basename(record.get("path") or ""),
+                "file_id": int(file_id),
+                "sonarr_season": ep_season,
+                "sonarr_episode": ep_number,
+            }
+        )
+    return gaps
+
+
 class SonarrEpisodeMapper:
     """Translates AniList episode numbering into Sonarr's, then registers it."""
 
@@ -318,9 +358,15 @@ class SonarrEpisodeMapper:
             candidates = await client.get_manual_import_candidates(
                 series_path, series_id=sonarr_id, filter_existing_files=True
             )
+            # Files this entry already has registered. Re-running the mapping
+            # will not surface these — Sonarr leaves out what it already
+            # tracks — but they are still where a missing quality lives.
+            episode_files = await client.get_episode_files(sonarr_id)
         finally:
             if owns_client:
                 await client.close()
+
+        quality_gaps = _quality_gaps(episodes, episode_files, season, ep_start, ep_end)
 
         matched: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
@@ -450,6 +496,7 @@ class SonarrEpisodeMapper:
             "episode_end": ep_end,
             "matched": matched,
             "skipped": skipped,
+            "quality_gaps": quality_gaps,
         }
 
     # ------------------------------------------------------------------
@@ -461,7 +508,23 @@ class SonarrEpisodeMapper:
         plan = await self.plan(anilist_id)
         matched = plan["matched"]
         if not matched:
-            return {**plan, "imported": 0, "command_id": None}
+            # Nothing left to register — but files registered by an earlier run
+            # can still be sitting there with no quality, and re-running the
+            # mapping is the natural thing to reach for. Do that part.
+            gaps = plan.get("quality_gaps") or []
+            quality: dict[str, Any] = {}
+            if gaps:
+                quality = await self.backfill_quality(
+                    plan["sonarr_id"],
+                    file_ids=[g["file_id"] for g in gaps],
+                    client=self._sonarr,
+                )
+            return {
+                **plan,
+                "imported": 0,
+                "command_id": None,
+                "quality": quality,
+            }
 
         series_path = plan["series_path"]
         files: list[dict[str, Any]] = []
@@ -499,7 +562,7 @@ class SonarrEpisodeMapper:
             if await self._await_command(client, command_id):
                 quality_result = await self.backfill_quality(
                     plan["sonarr_id"],
-                    [m["path"] for m in matched],
+                    paths=[m["path"] for m in matched],
                     client=client,
                 )
         finally:
@@ -554,7 +617,8 @@ class SonarrEpisodeMapper:
     async def backfill_quality(
         self,
         sonarr_id: int,
-        paths: list[str],
+        paths: list[str] | None = None,
+        file_ids: list[int] | None = None,
         client: SonarrClient | None = None,
     ) -> dict[str, Any]:
         """Give newly-imported files a real quality instead of "Unknown".
@@ -568,7 +632,7 @@ class SonarrEpisodeMapper:
         Only the database record changes; the file is never touched.
         """
         result: dict[str, Any] = {"updated": 0, "unresolved": []}
-        if not paths:
+        if not paths and not file_ids:
             return result
 
         owned = client is None
@@ -577,11 +641,15 @@ class SonarrEpisodeMapper:
         )
         try:
             files = await sonarr.get_episode_files(sonarr_id)
-            wanted = {os.path.normpath(p) for p in paths}
+            wanted_paths = {os.path.normpath(p) for p in (paths or [])}
+            wanted_ids = {int(i) for i in (file_ids or [])}
             targets = [
                 f
                 for f in files
-                if os.path.normpath(f.get("path") or "") in wanted
+                if (
+                    os.path.normpath(f.get("path") or "") in wanted_paths
+                    or int(f.get("id") or 0) in wanted_ids
+                )
                 and _is_unknown_quality(f.get("quality"))
             ]
             if not targets:
