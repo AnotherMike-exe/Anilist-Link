@@ -122,7 +122,7 @@ def _donor_quality(
         return None
     for f in files:
         q = f.get("quality")
-        if _is_unknown_quality(q):
+        if not q or _is_unknown_quality(q):
             continue
         if int((q.get("quality") or {}).get("resolution") or 0) == resolution:
             return q
