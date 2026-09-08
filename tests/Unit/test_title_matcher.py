@@ -733,11 +733,35 @@ class TestDetermineCorrectEntryAndEpisode:
         )
         assert result == (None, 0, 0)
 
-    def test_season_one_fallback_when_cr_season_missing(self) -> None:
-        """If cr_season isn't in structure and no absolute mapping fits, fall back."""
+    def test_refuses_season_one_fallback_when_cr_season_missing(self) -> None:
+        """Regression: an unknown CR season must not be folded onto Season 1.
+
+        Mushoku Tensei season 3 episode 10 used to land on AniList entry
+        108465 — season 1, 11 episodes — because the season map only covered
+        seasons 1 and 2. Reporting no match leaves AniList untouched instead of
+        writing a later season's episode number onto the wrong entry.
+        """
         struct = self._make_structure([(1, "Show", 12)])
-        entry, season, episode = TitleMatcher.determine_correct_entry_and_episode(
+        assert TitleMatcher.determine_correct_entry_and_episode(
             "Show", cr_season=5, cr_episode=3, season_structure=struct
+        ) == (None, 0, 0)
+
+    def test_refuses_missing_season_on_multi_season_structure(self) -> None:
+        """The refusal also applies when the show has several known seasons."""
+        struct = self._make_structure(
+            [(1, "Show", 11), (2, "Show Part 2", 12), (3, "Show II", 12)]
         )
-        assert season == 1
-        assert episode == 3
+        assert TitleMatcher.determine_correct_entry_and_episode(
+            "Show", cr_season=6, cr_episode=4, season_structure=struct
+        ) == (None, 0, 0)
+
+    def test_known_season_still_maps_after_guardrail(self) -> None:
+        """The guardrail must not disturb seasons that are in the map."""
+        struct = self._make_structure(
+            [(1, "Show", 11), (2, "Show Part 2", 12), (3, "Show II", 12)]
+        )
+        entry, season, episode = TitleMatcher.determine_correct_entry_and_episode(
+            "Show", cr_season=3, cr_episode=7, season_structure=struct
+        )
+        assert entry is not None
+        assert (season, episode) == (3, 7)

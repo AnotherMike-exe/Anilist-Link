@@ -114,7 +114,12 @@ def extract_base_series_title(title: str) -> str:
         r"\s*[-:]\s*.*(?:Season|Part)\s*\d+.*$",
         r"\s+(?:Season|Part)\s*\d+.*$",
         r"\s+\d+(?:st|nd|rd|th)\s+Season.*$",
-        r"\s+(?:II|III|IV|V|VI)(?:\s|$).*$",
+        # Lookahead (not a consuming group) so a Roman-numeral season marker
+        # is also stripped when a subtitle follows it directly:
+        # "Mushoku Tensei II: Isekai Ittara Honki Dasu". Without the ":" branch
+        # the colon split below leaves "Mushoku Tensei II", which lands the
+        # sequel in a different series group from "Mushoku Tensei".
+        r"\s+(?:II|III|IV|V|VI)(?=\s|:|$).*$",
         r"\s*[-:]\s*.*(?:Cour|Arc)\s*\d+.*$",
     ]
 
