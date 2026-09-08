@@ -237,14 +237,16 @@
     // --- AniList API status banner ---
     // Shows an always-visible bar while the AniList API is down (all syncs,
     // scans and downloads are halted) or running with a reduced rate limit.
-    // Polled every 15s; the elapsed/next-check counters tick locally in
+    // Polled every 60s; the elapsed/next-check counters tick locally in
     // between so the downtime figure stays live without extra requests.
+    // "Check now" updates the bar from its own response, so a click never
+    // waits on the poll.
     (function () {
         const bar = document.getElementById('anilist-status-bar');
         const headlineEl = document.getElementById('anilist-status-headline');
         const detailEl = document.getElementById('anilist-status-detail');
         const checkBtn = document.getElementById('anilist-status-check');
-        const POLL_MS = 15000;
+        const POLL_MS = 60000;
 
         let snapshot = null;      // last payload from the server
         let syncedAt = 0;         // Date.now() when it arrived

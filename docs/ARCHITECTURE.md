@@ -108,7 +108,7 @@ of their per-item loops rather than marking every remaining item unmatched;
 the watchlist refresh and the synonyms backfill stop early.
 
 **Surfacing it.** `GET /api/anilist/status` feeds an always-visible banner in
-`base.html` (polled every 15s, counters tick locally in between) showing the
+`base.html` (polled every 60s, counters tick locally in between) showing the
 reason, total downtime, and the countdown to the next check, with a **Check
 now** button (`POST /api/anilist/check-now`). Outage state is persisted to
 `app_settings` under `anilist.health`, so a container restart reports the true
@@ -177,7 +177,7 @@ FastAPI application with Jinja2 templates:
 - **Onboarding** (`/onboarding`): 4-step setup wizard for new users
 - **Connection Tests** (`/api/test/*`): Live connection validation for all services
 - **Floating progress widget**: In `base.html`, polls `GET /api/progress` every 2s for background task feedback
-- **AniList status banner**: In `base.html`, polls `GET /api/anilist/status` every 15s; shows an outage/reduced-rate-limit bar with live downtime, next-check countdown, and a **Check now** action. See 3.1.1
+- **AniList status banner**: In `base.html`, polls `GET /api/anilist/status` every 60s; shows an outage/reduced-rate-limit bar with live downtime, next-check countdown, and a **Check now** action. See 3.1.1
 - **Rate Your Completed Shows**: Dashboard card listing AniList `COMPLETED` entries with `score == 0`; rating submits via `SaveMediaListEntry(score)` and updates locally. Toggle: `app.show_unrated_completed` (Settings + Onboarding, default on). Shared rating control (`rating-widget.js`) adapts to the account's `scoreFormat`.
 - **Glance integration** (`/glance/rate-completed`): Standalone, iframe-sized page exposing the same unrated-completed list + rating action for embedding in a [Glance](https://github.com/glanceapp/glance) dashboard. Gated by a shared API key (`glance.api_key`) generated from Settings — the only credentialed endpoint in an otherwise local-network-trust app.
 
