@@ -32,6 +32,9 @@ class ArrPostProcessor:
         self._db = db
         self._config = config
         self._app_state = app_state
+        # Per-run memo of franchise-root resolution (anilist_id -> root id) so a
+        # per-file reprocess loop doesn't re-walk the PREQUEL chain repeatedly.
+        self._root_cache: dict[int, int] = {}
 
     def _schedule_media_server_sync(self) -> None:
         """Queue a debounced Plex/Jellyfin refresh + metadata apply.
@@ -131,7 +134,9 @@ class ArrPostProcessor:
             )
             return
 
-        anilist_id = await self._resolve_sonarr_anilist_id(sonarr_id, season_number)
+        anilist_id = await self._resolve_sonarr_anilist_id(
+            sonarr_id, season_number, episode_number
+        )
         if not anilist_id:
             logger.info(
                 "No AniList mapping for sonarr_id=%d season=%d — skipping",
@@ -150,7 +155,9 @@ class ArrPostProcessor:
             original_name, season_info, season_number, episode_number
         )
         safe_dir = await self._get_folder_name(show_info)
-        season_dir = await self._get_season_folder_name(season_number, season_info)
+        season_dir = await self._get_entry_subfolder(
+            anilist_id, season_number, show_info, season_info
+        )
 
         # Path prefix translation for Docker/remote setups
         arr_prefix = self._config.sonarr.path_prefix
@@ -257,7 +264,11 @@ class ArrPostProcessor:
 
         original_name = Path(current_path).name
         filename = await self._get_movie_file_name(original_name, title_info)
-        safe_dir = await self._get_folder_name(title_info)
+        await self._ensure_series_group(anilist_id)
+        await self._ensure_metadata_cached(anilist_id)
+        # _get_movie_relative_dir resolves the franchise root (series group or
+        # PREQUEL chain) and caches its title/year so nesting + naming match.
+        rel_dir = await self._get_movie_relative_dir(anilist_id)
 
         # Use library output path as target root; fall back to Radarr movie root
         library_path = await self._get_library_output_path(anilist_format="MOVIE")
@@ -277,7 +288,7 @@ class ArrPostProcessor:
 
         local_root = Path(self._to_local(target_root, arr_prefix, local_prefix))
         local_current = self._to_local(current_path, arr_prefix, local_prefix)
-        local_target = str(local_root / safe_dir / filename)
+        local_target = str(local_root / rel_dir / filename)
 
         if Path(local_target).resolve() == Path(local_current).resolve():
             logger.debug("Radarr file already at target path: %s", current_path)
@@ -287,7 +298,7 @@ class ArrPostProcessor:
             return
 
         arr_movie_path = self._to_arr(
-            str(local_root / safe_dir), arr_prefix, local_prefix
+            str(local_root / rel_dir), arr_prefix, local_prefix
         )
         radarr = RadarrClient(
             url=self._config.radarr.url, api_key=self._config.radarr.api_key
@@ -305,6 +316,18 @@ class ArrPostProcessor:
             )
         finally:
             await radarr.close()
+
+        # Remove the movie's old folder so we don't orphan stale nfo/artwork
+        self._prune_orphan_source(
+            local_current, str(local_root / rel_dir), str(local_root)
+        )
+
+        # When nested under a group root, ensure the show folder carries a
+        # tvshow.nfo so Jellyfin classifies + sorts it (mirrors the Sonarr path).
+        if rel_dir.parent != Path("."):
+            await self._write_show_nfo_if_missing(
+                str(local_root / rel_dir.parent), anilist_id, title_info["title"]
+            )
 
         self._schedule_media_server_sync()
 
@@ -325,6 +348,229 @@ class ArrPostProcessor:
         if arr_prefix and local_prefix and path.startswith(local_prefix):
             return arr_prefix + path[len(local_prefix) :]
         return path
+
+    # ------------------------------------------------------------------
+    # Path reconciliation
+    # ------------------------------------------------------------------
+
+    async def _candidate_folder_names(self, anilist_ids: list[int]) -> list[str]:
+        """Render show folder names for *anilist_ids*, de-duplicated, order kept.
+
+        Blank names are dropped — an empty folder name would resolve to the
+        library root itself, which must never be treated as a show folder.
+        """
+        names: list[str] = []
+        for aid in anilist_ids:
+            try:
+                show_info, _ = await self._get_show_and_season_info(aid)
+            except Exception:
+                continue
+            if not show_info.get("title"):
+                continue
+            folder = (await self._get_folder_name(show_info) or "").strip(" /.")
+            if folder and folder not in names:
+                names.append(folder)
+        return names
+
+    async def _related_anilist_ids(self, sonarr_id: int, anilist_id: int) -> list[int]:
+        """Return *anilist_id* first, then every other entry mapped to this series.
+
+        The series group may not exist yet when a series is first linked, so the
+        entry's own title can differ from the library folder (which is named
+        after the group root).  Checking siblings covers that case.
+        """
+        ids: list[int] = [anilist_id]
+        for sql in (
+            "SELECT anilist_id FROM anilist_sonarr_season_mapping"
+            " WHERE sonarr_id=? ORDER BY season_number",
+            "SELECT anilist_id FROM anilist_sonarr_mapping WHERE sonarr_id=?",
+        ):
+            try:
+                for row in await self._db.fetch_all(sql, (sonarr_id,)):
+                    aid = int(row["anilist_id"])
+                    if aid not in ids:
+                        ids.append(aid)
+            except Exception:
+                logger.debug("Could not load related entries", exc_info=True)
+        return ids
+
+    async def sync_sonarr_series_path(
+        self,
+        sonarr_id: int,
+        anilist_id: int,
+        sonarr: SonarrClient | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Repoint a Sonarr series at its restructured library folder.
+
+        Sonarr keeps whatever path it was given when the series was added, so a
+        series whose files were later moved by the restructurer still points at
+        the old location and reports every episode as missing.  This finds the
+        show folder in our library and updates Sonarr's record to match, then
+        rescans so the existing files are picked up.
+
+        Only ever updates the stored path — files are never moved.  The update
+        is applied *only* when the expected folder actually exists on disk, so
+        a series with no files yet (or one that was never restructured) is left
+        exactly as Sonarr has it.
+        """
+        if not self._config.sonarr.url or not self._config.sonarr.api_key:
+            return {"ok": False, "action": "not_configured"}
+
+        library_path = await self._get_library_output_path(anilist_format="TV")
+        if not library_path:
+            return {"ok": True, "action": "no_library_path"}
+
+        arr_prefix = self._config.sonarr.path_prefix
+        local_prefix = self._config.sonarr.local_path_prefix
+        local_root = self._to_local(library_path, arr_prefix, local_prefix)
+
+        candidates = await self._candidate_folder_names(
+            await self._related_anilist_ids(sonarr_id, anilist_id)
+        )
+        if not candidates:
+            return {"ok": True, "action": "no_title"}
+
+        local_target: str = ""
+        for folder in candidates:
+            probe = Path(local_root) / folder
+            if probe.is_dir():
+                local_target = str(probe)
+                break
+
+        if not local_target:
+            # Files aren't at the restructured location — leave Sonarr alone
+            # rather than pointing it at a folder that doesn't exist.
+            return {"ok": True, "action": "target_missing", "checked": candidates}
+
+        arr_target = self._to_arr(local_target, arr_prefix, local_prefix)
+
+        owns_client = sonarr is None
+        client = sonarr or SonarrClient(
+            url=self._config.sonarr.url, api_key=self._config.sonarr.api_key
+        )
+        try:
+            series = await client.get_series_by_id(sonarr_id)
+            if not series:
+                return {"ok": False, "action": "not_found"}
+
+            current = str(series.get("path", ""))
+            if current.rstrip("/") == arr_target.rstrip("/"):
+                return {"ok": True, "action": "already_correct", "path": current}
+
+            if dry_run:
+                return {
+                    "ok": True,
+                    "action": "would_update",
+                    "from": current,
+                    "to": arr_target,
+                }
+
+            await client.update_series_path(sonarr_id, arr_target)
+            logger.info(
+                "Sonarr series id=%d path %s → %s (restructured location)",
+                sonarr_id,
+                current or "(none)",
+                arr_target,
+            )
+            try:
+                await client.rescan_series(sonarr_id)
+            except Exception as exc:
+                logger.warning("Rescan failed for sonarr_id=%d: %s", sonarr_id, exc)
+
+            return {
+                "ok": True,
+                "action": "updated",
+                "from": current,
+                "to": arr_target,
+            }
+        finally:
+            if owns_client:
+                await client.close()
+
+    async def sync_radarr_movie_path(
+        self,
+        radarr_id: int,
+        anilist_id: int,
+        radarr: RadarrClient | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Repoint a Radarr movie at its restructured library folder.
+
+        Radarr equivalent of :meth:`sync_sonarr_series_path` — same rules: the
+        stored path only, never a file move, and only when the expected folder
+        already exists on disk.
+        """
+        if not self._config.radarr.url or not self._config.radarr.api_key:
+            return {"ok": False, "action": "not_configured"}
+
+        library_path = await self._get_library_output_path(anilist_format="MOVIE")
+        if not library_path:
+            return {"ok": True, "action": "no_library_path"}
+
+        arr_prefix = self._config.radarr.path_prefix
+        local_prefix = self._config.radarr.local_path_prefix
+        local_root = self._to_local(library_path, arr_prefix, local_prefix)
+
+        title_info = await self._get_anilist_title_info(anilist_id)
+        if not title_info["title"]:
+            return {"ok": True, "action": "no_title"}
+
+        # Use the same layout the post-processor files movies into, so a movie
+        # nested under its franchise root is found there and not just flat.
+        relative_dir = await self._get_movie_relative_dir(anilist_id)
+        folder = str(relative_dir).strip(" /.")
+        if not folder:
+            return {"ok": True, "action": "no_title"}
+
+        local_target_path = Path(local_root) / folder
+        if not local_target_path.is_dir():
+            return {"ok": True, "action": "target_missing", "checked": [folder]}
+
+        arr_target = self._to_arr(str(local_target_path), arr_prefix, local_prefix)
+
+        owns_client = radarr is None
+        client = radarr or RadarrClient(
+            url=self._config.radarr.url, api_key=self._config.radarr.api_key
+        )
+        try:
+            movie = await client.get_movie_by_id(radarr_id)
+            if not movie:
+                return {"ok": False, "action": "not_found"}
+
+            current = str(movie.get("path", ""))
+            if current.rstrip("/") == arr_target.rstrip("/"):
+                return {"ok": True, "action": "already_correct", "path": current}
+
+            if dry_run:
+                return {
+                    "ok": True,
+                    "action": "would_update",
+                    "from": current,
+                    "to": arr_target,
+                }
+
+            await client.update_movie_path(radarr_id, arr_target)
+            logger.info(
+                "Radarr movie id=%d path %s → %s (restructured location)",
+                radarr_id,
+                current or "(none)",
+                arr_target,
+            )
+            try:
+                await client.rescan_movie(radarr_id)
+            except Exception as exc:
+                logger.warning("Rescan failed for radarr_id=%d: %s", radarr_id, exc)
+
+            return {
+                "ok": True,
+                "action": "updated",
+                "from": current,
+                "to": arr_target,
+            }
+        finally:
+            if owns_client:
+                await client.close()
 
     async def reprocess_sonarr_series(
         self, sonarr_id: int, dry_run: bool = False
@@ -388,7 +634,7 @@ class ArrPostProcessor:
                     season_number = file_season.get(file_id, 1)
                     episode_number = file_episode.get(file_id, 0)
                     anilist_id = await self._resolve_sonarr_anilist_id(
-                        sonarr_id, season_number
+                        sonarr_id, season_number, episode_number
                     )
                     if not anilist_id:
                         continue
@@ -404,8 +650,8 @@ class ArrPostProcessor:
                         original_name, season_info, season_number, episode_number
                     )
                     safe_dir = await self._get_folder_name(show_info)
-                    season_dir = await self._get_season_folder_name(
-                        season_number, season_info
+                    season_dir = await self._get_entry_subfolder(
+                        anilist_id, season_number, show_info, season_info
                     )
 
                     local_current = self._to_local(
@@ -497,7 +743,7 @@ class ArrPostProcessor:
                 season_number = file_season.get(file_id, 1)
                 episode_number = file_episode.get(file_id, 0)
                 anilist_id = await self._resolve_sonarr_anilist_id(
-                    sonarr_id, season_number
+                    sonarr_id, season_number, episode_number
                 )
                 if not anilist_id:
                     logger.info(
@@ -526,8 +772,8 @@ class ArrPostProcessor:
                     original_name, season_info, season_number, episode_number
                 )
                 safe_dir = await self._get_folder_name(show_info)
-                season_dir = await self._get_season_folder_name(
-                    season_number, season_info
+                season_dir = await self._get_entry_subfolder(
+                    anilist_id, season_number, show_info, season_info
                 )
 
                 # Paths for local move
@@ -540,12 +786,32 @@ class ArrPostProcessor:
                     local_series_for_file = local_series_fallback or ""
                 local_target = str(Path(local_series_for_file) / season_dir / filename)
 
+                logger.info(
+                    "Sonarr reprocess file_id=%d anilist_id=%d season=%d:"
+                    " show_folder=%r subfolder=%r\n    from: %s\n    to:   %s",
+                    file_id,
+                    anilist_id,
+                    season_number,
+                    safe_dir,
+                    season_dir,
+                    local_current,
+                    local_target,
+                )
+
                 if Path(local_target).resolve() == Path(local_current).resolve():
+                    logger.info(
+                        "Skipping file_id=%d — already at target location", file_id
+                    )
                     skipped += 1
                     continue
 
                 # Source gone but target exists = already moved previously
                 if not Path(local_current).exists() and Path(local_target).exists():
+                    logger.info(
+                        "Skipping file_id=%d — source missing and target exists"
+                        " (already moved)",
+                        file_id,
+                    )
                     skipped += 1
                     continue
 
@@ -580,6 +846,14 @@ class ArrPostProcessor:
 
             if moved > 0:
                 self._schedule_media_server_sync()
+            logger.info(
+                "Sonarr reprocess complete for sonarr_id=%d: moved=%d skipped=%d"
+                " errors=%d",
+                sonarr_id,
+                moved,
+                skipped,
+                errors,
+            )
             return {"ok": True, "moved": moved, "skipped": skipped, "errors": errors}
         finally:
             await sonarr.close()
@@ -639,7 +913,9 @@ class ArrPostProcessor:
                 )
                 target_root = str(arr_root)
             local_root = Path(self._to_local(target_root, arr_prefix, local_prefix))
-            safe_dir = await self._get_folder_name(title_info)
+            await self._ensure_series_group(anilist_id)
+            await self._ensure_metadata_cached(anilist_id)
+            rel_dir = await self._get_movie_relative_dir(anilist_id)
 
             if dry_run:
                 plan: list[dict[str, Any]] = []
@@ -656,7 +932,7 @@ class ArrPostProcessor:
                     local_current = self._to_local(
                         arr_current, arr_prefix, local_prefix
                     )
-                    local_target = str(local_root / safe_dir / filename)
+                    local_target = str(local_root / rel_dir / filename)
                     arr_target = self._to_arr(local_target, arr_prefix, local_prefix)
 
                     already_at_target = (
@@ -667,7 +943,7 @@ class ArrPostProcessor:
                             "file_id": file_id,
                             "anilist_id": anilist_id,
                             "anilist_title": title_info["title"],
-                            "folder_name": safe_dir,
+                            "folder_name": str(rel_dir),
                             "arr_from": arr_current,
                             "arr_to": arr_target,
                             "local_from": local_current,
@@ -679,6 +955,7 @@ class ArrPostProcessor:
 
             moved = skipped = errors = 0
             movie_path_updated = False
+            orphan_sources: list[str] = []
 
             for mf in movie_files:
                 file_id = mf.get("id", 0)
@@ -689,7 +966,7 @@ class ArrPostProcessor:
                 original_name = Path(arr_current).name
                 filename = await self._get_movie_file_name(original_name, title_info)
                 local_current = self._to_local(arr_current, arr_prefix, local_prefix)
-                local_target = str(local_root / safe_dir / filename)
+                local_target = str(local_root / rel_dir / filename)
 
                 if Path(local_target).resolve() == Path(local_current).resolve():
                     skipped += 1
@@ -703,10 +980,12 @@ class ArrPostProcessor:
                     errors += 1
                     continue
 
+                orphan_sources.append(local_current)
+
                 # Update movie path in Radarr once
                 if not movie_path_updated:
                     arr_movie_path = self._to_arr(
-                        str(local_root / safe_dir), arr_prefix, local_prefix
+                        str(local_root / rel_dir), arr_prefix, local_prefix
                     )
                     try:
                         await radarr.update_movie_path(radarr_id, arr_movie_path)
@@ -723,6 +1002,19 @@ class ArrPostProcessor:
                         )
                     movie_path_updated = True
                 moved += 1
+
+            # Remove each moved file's old folder if nothing but stale metadata
+            # remains, so we don't orphan the previous movie directory.
+            target_dir = str(local_root / rel_dir)
+            for src in orphan_sources:
+                self._prune_orphan_source(src, target_dir, str(local_root))
+
+            # When nested under a group root, write the show folder's tvshow.nfo
+            # so Jellyfin classifies + sorts it (mirrors the Sonarr path).
+            if moved and rel_dir.parent != Path("."):
+                await self._write_show_nfo_if_missing(
+                    str(local_root / rel_dir.parent), anilist_id, title_info["title"]
+                )
 
             # Always rescan so Radarr discovers files at their current paths
             try:
@@ -746,17 +1038,48 @@ class ArrPostProcessor:
     # ------------------------------------------------------------------
 
     async def _resolve_sonarr_anilist_id(
-        self, sonarr_id: int, season_number: int
+        self,
+        sonarr_id: int,
+        season_number: int,
+        episode_number: int | None = None,
     ) -> int | None:
-        """Return the AniList ID for a given Sonarr series + season."""
+        """Return the AniList ID for a Sonarr series + season (+ episode).
+
+        A Sonarr season can map to several AniList entries when the cour is
+        split (Mushoku Tensei S2 Part 1 / Part 2), so *episode_number* selects
+        which part a file belongs to.  Without it — or when the season has a
+        single whole-season mapping — the season's first range is used, which
+        is the 1:1 behaviour.
+        """
         # Per-season mapping takes precedence (multi-season TVDB series)
-        row = await self._db.fetch_one(
-            "SELECT anilist_id FROM anilist_sonarr_season_mapping"
-            " WHERE sonarr_id=? AND season_number=?",
+        rows = await self._db.fetch_all(
+            "SELECT anilist_id, episode_start, episode_end"
+            " FROM anilist_sonarr_season_mapping"
+            " WHERE sonarr_id=? AND season_number=?"
+            " ORDER BY episode_start",
             (sonarr_id, season_number),
         )
-        if row:
-            return int(row["anilist_id"])
+        if rows:
+            if episode_number and len(rows) > 1:
+                for r in rows:
+                    start = int(r["episode_start"] or 1)
+                    end = r["episode_end"]
+                    if episode_number >= start and (
+                        end is None or episode_number <= int(end)
+                    ):
+                        return int(r["anilist_id"])
+                # Past the last known range — an episode aired beyond what the
+                # chain covered. The final part is the best available answer.
+                logger.info(
+                    "sonarr_id=%d S%02dE%02d is past every mapped range;"
+                    " using the last part (anilist_id=%s)",
+                    sonarr_id,
+                    season_number,
+                    episode_number,
+                    rows[-1]["anilist_id"],
+                )
+                return int(rows[-1]["anilist_id"])
+            return int(rows[0]["anilist_id"])
 
         # If season-specific mappings exist for this series but none matched,
         # don't fall back — routing to the wrong AniList entry is worse than
@@ -907,18 +1230,271 @@ class ArrPostProcessor:
         always uses this entry's own titles (for the season subfolder).
 
         If no series group exists, both dicts are identical.
+
+        The root is resolved via the series group when it already traces to a
+        distinct root, else by walking the PREQUEL chain to the franchise base
+        — so a self-rooted/stale group can't strand an entry (e.g. a Demon
+        Slayer movie tracked in Sonarr) in a top-level folder.
         """
         entry_info = await self._get_anilist_title_info(anilist_id)
 
-        group = await self._db.get_series_group_by_anilist_id(anilist_id)
-        if group:
-            root_id = group.get("root_anilist_id")
-            if root_id and root_id != anilist_id:
-                root_info = await self._get_anilist_title_info(root_id)
-                if root_info["title"]:
-                    return root_info, entry_info
+        root_id = await self._resolve_franchise_root(anilist_id)
+        if root_id and root_id != anilist_id:
+            await self._ensure_metadata_cached(root_id)
+            root_info = await self._get_anilist_title_info(root_id)
+            if root_info["title"]:
+                return root_info, entry_info
 
         return entry_info, entry_info
+
+    @staticmethod
+    def _disambiguate_movie_folder(folder: str, title_info: dict) -> str:
+        """Ensure a nested movie folder carries a distinguishing token.
+
+        Under a shared franchise root a movie can otherwise collide with a
+        same-named TV season (e.g. the Mugen Train movie vs the Mugen Train TV
+        arc).  When the rendered folder already carries the year (the usual
+        template) it is returned unchanged; otherwise the year — or a ``[Movie]``
+        marker when no year is known — is appended as a backup.
+        """
+        if not folder:
+            return folder
+        year = title_info.get("year") or 0
+        if year:
+            if str(year) not in folder:
+                return f"{folder} ({year})"
+            return folder
+        if not folder.rstrip().lower().endswith("[movie]"):
+            return f"{folder} [Movie]"
+        return folder
+
+    async def _get_entry_subfolder(
+        self,
+        anilist_id: int,
+        season_number: int,
+        show_info: dict,
+        season_info: dict,
+    ) -> str:
+        """Return the subfolder under the show/root folder for one Sonarr entry.
+
+        - A movie nested under a franchise root gets its own (disambiguated)
+          title folder, so it can't collide with a same-named TV season.
+        - A standalone movie gets no subfolder (file sits in the show folder,
+          mirroring Radarr's flat layout).
+        - A TV entry keeps its season folder.
+        """
+        from src.Utils.NamingTranslator import is_movie_format
+
+        fmt = await self._get_entry_format(anilist_id)
+        if not is_movie_format(fmt):
+            return await self._get_season_folder_name(season_number, season_info)
+
+        # Movie: nested only when a distinct franchise root was resolved.
+        if show_info is season_info:
+            return ""
+        folder = await self._get_folder_name(season_info)
+        return self._disambiguate_movie_folder(folder, season_info)
+
+    async def _get_movie_relative_dir(self, anilist_id: int) -> Path:
+        """Return a Radarr movie's folder path relative to the library root.
+
+        Mirrors the Sonarr layout: when the movie belongs to a series group,
+        it is nested under the group ROOT folder (e.g. ``Demon Slayer/Infinity
+        Castle``); otherwise it lands in a flat ``<movie folder>``.
+        """
+        movie_info = await self._get_anilist_title_info(anilist_id)
+        movie_dir = await self._get_folder_name(movie_info)
+
+        # Radarr entries are always movies — always allow the prequel walk.
+        root_id = await self._resolve_franchise_root(anilist_id, force_walk=True)
+        if root_id and root_id != anilist_id:
+            # Make sure the root's title/year are cached so the folder renders
+            # the same name as the metadata writer's master folder.
+            await self._ensure_metadata_cached(root_id)
+            root_info = await self._get_anilist_title_info(root_id)
+            if root_info.get("title"):
+                root_dir = await self._get_folder_name(root_info)
+                if root_dir and root_dir != movie_dir:
+                    # Guarantee the movie folder differs from any TV season
+                    # under the same root.
+                    movie_dir = self._disambiguate_movie_folder(movie_dir, movie_info)
+                    return Path(root_dir) / movie_dir
+        return Path(movie_dir)
+
+    async def _resolve_franchise_root(
+        self, anilist_id: int, force_walk: bool = False
+    ) -> int:
+        """Resolve the franchise ROOT AniList id for nesting an entry.
+
+        Trusts the series group when it already traces to a distinct root;
+        otherwise walks the PREQUEL chain back to the base (e.g. a Demon Slayer
+        movie → base TV season) so a stale/self-rooted group can't strand the
+        entry in a top-level folder.
+
+        The prequel walk only runs for MOVIE-format entries (or when
+        ``force_walk`` is set, as on the always-a-movie Radarr path).  TV
+        entries keep the series-group behaviour so a normal multi-cour show
+        isn't split when a new episode arrives.
+        """
+        if anilist_id in self._root_cache:
+            return self._root_cache[anilist_id]
+
+        group = await self._db.get_series_group_by_anilist_id(anilist_id)
+        if group and group.get("root_anilist_id"):
+            root = int(group["root_anilist_id"])
+            if root != anilist_id:
+                logger.info(
+                    "Franchise root for anilist_id=%d = %d (via series group)",
+                    anilist_id,
+                    root,
+                )
+                self._root_cache[anilist_id] = root
+                return root
+
+        resolved = anilist_id
+        should_walk = force_walk
+        fmt = ""
+        if not should_walk:
+            from src.Utils.NamingTranslator import is_movie_format
+
+            fmt = await self._get_entry_format(anilist_id)
+            should_walk = is_movie_format(fmt)
+
+        if should_walk:
+            anilist_client = getattr(self._app_state, "anilist_client", None)
+            if anilist_client is None:
+                logger.warning(
+                    "Cannot walk prequel chain for anilist_id=%d — no AniList"
+                    " client on app_state",
+                    anilist_id,
+                )
+            else:
+                try:
+                    from src.Utils.NamingTranslator import resolve_franchise_root_id
+
+                    resolved = await resolve_franchise_root_id(
+                        anilist_id, anilist_client
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Prequel-root walk failed for anilist_id=%d: %s",
+                        anilist_id,
+                        exc,
+                    )
+            logger.info(
+                "Franchise root for anilist_id=%d = %d (via PREQUEL walk,"
+                " group_root=%s, format=%r)",
+                anilist_id,
+                resolved,
+                (group or {}).get("root_anilist_id"),
+                fmt,
+            )
+        else:
+            logger.info(
+                "No prequel walk for anilist_id=%d (format=%r, force_walk=%s,"
+                " group_root=%s) — staying flat",
+                anilist_id,
+                fmt,
+                force_walk,
+                (group or {}).get("root_anilist_id"),
+            )
+        self._root_cache[anilist_id] = resolved
+        return resolved
+
+    async def _get_entry_format(self, anilist_id: int) -> str:
+        """Return the AniList format (e.g. MOVIE/TV) from the user's watchlist."""
+        try:
+            users = await self._db.get_users_by_service("anilist")
+            if users:
+                entry = await self._db.get_watchlist_entry(
+                    users[0]["user_id"], anilist_id
+                )
+                if entry and entry.get("anilist_format"):
+                    return str(entry["anilist_format"])
+        except Exception:
+            logger.debug("format lookup failed for anilist_id=%d", anilist_id)
+        return ""
+
+    async def _ensure_series_group(self, anilist_id: int) -> None:
+        """Build the series group for an entry if one isn't cached yet.
+
+        Radarr adds don't populate series groups (only the Sonarr sibling
+        auto-link does), so a movie may have no group on record — which would
+        flatten its library folder instead of nesting it under the group root
+        (e.g. ``Demon Slayer/Infinity Castle``).  Build one on demand when the
+        AniList client is reachable via app_state.  Best-effort: any failure
+        leaves the movie in a flat folder rather than blocking the move.
+        """
+        try:
+            if await self._db.get_series_group_by_anilist_id(anilist_id):
+                return
+            anilist_client = getattr(self._app_state, "anilist_client", None)
+            if anilist_client is None:
+                return
+            from src.Scanner.SeriesGroupBuilder import SeriesGroupBuilder
+
+            builder = SeriesGroupBuilder(db=self._db, anilist_client=anilist_client)
+            await builder.get_or_build_group(anilist_id)
+            logger.info("Built series group on demand for anilist_id=%d", anilist_id)
+        except Exception as exc:
+            logger.warning(
+                "Could not ensure series group for anilist_id=%d: %s", anilist_id, exc
+            )
+
+    async def _ensure_metadata_cached(self, anilist_id: int) -> None:
+        """Backfill anilist_cache with the year when it's missing.
+
+        Folder naming renders ``{year}`` from the cache; when an entry (or its
+        group root) has no cached year the folder loses its ``(2019)`` suffix
+        and no longer matches the metadata writer's folder — leaving the moved
+        item in a differently-named, mis-sorted directory.  Fetch from AniList
+        and upsert the year, preserving any provider IDs already cached.
+        Best-effort — never blocks the move.
+        """
+        try:
+            cached = await self._db.get_cached_metadata(anilist_id) or {}
+            if cached.get("year"):
+                return
+            anilist_client = getattr(self._app_state, "anilist_client", None)
+            if anilist_client is None:
+                return
+            media = await anilist_client.get_anime_by_id(anilist_id)
+            if not media:
+                return
+            year = media.get("seasonYear") or (media.get("startDate") or {}).get("year")
+            if not year:
+                return
+            import json as _json
+
+            title = media.get("title") or {}
+            await self._db.set_cached_metadata(
+                anilist_id=anilist_id,
+                title_romaji=title.get("romaji") or cached.get("title_romaji") or "",
+                title_english=title.get("english") or cached.get("title_english") or "",
+                title_native=title.get("native") or cached.get("title_native") or "",
+                synonyms=[s for s in (media.get("synonyms") or []) if s],
+                episodes=media.get("episodes"),
+                cover_image=(media.get("coverImage") or {}).get("large", "")
+                or cached.get("cover_image")
+                or "",
+                description=media.get("description") or cached.get("description") or "",
+                genres=_json.dumps(media.get("genres") or []),
+                status=media.get("status") or cached.get("status") or "",
+                year=int(year),
+                # Preserve fields the group builder / scanner may have populated
+                rating=cached.get("rating"),
+                studio=cached.get("studio") or "",
+                imdb_id=cached.get("imdb_id") or "",
+                tvdb_id=cached.get("tvdb_id") or "",
+                tvmaze_id=cached.get("tvmaze_id") or "",
+            )
+            logger.info(
+                "Backfilled cached year=%d for anilist_id=%d", int(year), anilist_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not backfill metadata for anilist_id=%d: %s", anilist_id, exc
+            )
 
     async def _get_anilist_title_and_year(self, anilist_id: int) -> tuple[str, int]:
         """Return the best available (title, year) for an AniList entry."""
@@ -966,6 +1542,24 @@ class ArrPostProcessor:
             "title_english": english,
             "year": year,
         }
+
+    @staticmethod
+    def _prune_orphan_source(local_current: str, *protected: str) -> None:
+        """Remove the moved file's old folder if no media remains there.
+
+        Reuses the restructurer's cleanup so a move leaves behind no orphaned
+        folder full of stale nfo/artwork.  ``protected`` guards the move target
+        and library root from deletion.  Best-effort — never blocks the move.
+        """
+        try:
+            from src.Scanner.LibraryRestructurer import prune_orphaned_dir
+
+            old_dir = str(Path(local_current).parent)
+            prune_orphaned_dir(old_dir, list(protected))
+        except Exception:
+            logger.debug(
+                "Orphan-source prune failed for %s", local_current, exc_info=True
+            )
 
     @staticmethod
     def _move_file(src: str, dst: str) -> bool:

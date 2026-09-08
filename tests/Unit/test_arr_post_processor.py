@@ -55,6 +55,15 @@ def _make_db(
 
     db.fetch_one = fetch_one
 
+    async def fetch_all(query: str, params: tuple = ()) -> list[dict[str, Any]]:
+        # Season resolution reads ranges; this fixture models a single
+        # whole-season mapping (episode 1 onwards, no end).
+        if "anilist_sonarr_season_mapping" in query:
+            return [{"anilist_id": 21234, "episode_start": 1, "episode_end": None}]
+        return []
+
+    db.fetch_all = fetch_all
+
     async def get_users_by_service(service: str) -> list:
         return []
 
@@ -537,6 +546,20 @@ def _make_season_resolve_db(
                 {"season_number": s, "anilist_id": a}
                 for s, a in sorted(per_season.items())
             ]
+        # Season lookup is now range-aware: one row per (season, episode range).
+        # These fixtures model whole-season mappings, so each is 1 → open-ended.
+        if "AND season_number=?" in q and "ORDER BY episode_start" in q:
+            season = params[1]
+            aid = per_season.get(season)
+            if aid is None:
+                return []
+            return [
+                {
+                    "anilist_id": aid,
+                    "episode_start": 1,
+                    "episode_end": None,
+                }
+            ]
         return []
 
     async def execute(query: str, params: tuple = ()) -> None:
@@ -580,9 +603,7 @@ async def test_resolve_unmapped_season_self_heals() -> None:
         return [100, 200]  # S1=100, S2=200
 
     with (
-        patch(
-            "src.Clients.AnilistClient.AniListClient", return_value=fake_client
-        ),
+        patch("src.Clients.AnilistClient.AniListClient", return_value=fake_client),
         patch(
             "src.Utils.NamingTranslator.collect_series_chain", side_effect=fake_chain
         ),
@@ -637,3 +658,525 @@ async def test_resolve_series_level_when_no_season_table() -> None:
     processor = ArrPostProcessor(db=db, config=_config_with_anilist())
     aid = await processor._resolve_sonarr_anilist_id(42, 1)
     assert aid == 321
+
+
+# ---------------------------------------------------------------------------
+# Movie folder nesting (series-group awareness)
+# ---------------------------------------------------------------------------
+
+
+def _folder_by_title(title_info: dict) -> str:
+    """Fake _get_folder_name: return a folder derived from the info's title."""
+    return title_info["title"]
+
+
+def _wire_movie_relative_dir(
+    processor: ArrPostProcessor, root_id: int, titles: dict[int, str]
+) -> None:
+    """Wire the collaborators of _get_movie_relative_dir for a movie test.
+
+    titles maps anilist_id -> folder title; root_id is what the franchise-root
+    resolver returns for the movie under test.
+    """
+
+    async def title_info(anilist_id: int) -> dict:
+        return _title_info(title=titles.get(anilist_id, ""))
+
+    async def resolve_root(anilist_id: int, force_walk: bool = False) -> int:
+        return root_id
+
+    processor._get_anilist_title_info = title_info  # type: ignore[assignment]
+    processor._resolve_franchise_root = resolve_root  # type: ignore[assignment]
+    processor._ensure_metadata_cached = AsyncMock()  # type: ignore[method-assign]
+    processor._get_folder_name = AsyncMock(side_effect=_folder_by_title)  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_movie_relative_dir_nests_under_franchise_root() -> None:
+    """A franchise movie nests under the resolved root folder (Demon Slayer/...)."""
+    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+    _wire_movie_relative_dir(
+        processor, root_id=101, titles={55: "Infinity Castle", 101: "Demon Slayer"}
+    )
+    rel = await processor._get_movie_relative_dir(55)
+    # No year on the stub info → the collision-safe backup appends [Movie].
+    assert str(rel) == "Demon Slayer/Infinity Castle [Movie]"
+
+
+@pytest.mark.asyncio
+async def test_movie_relative_dir_flat_when_no_prequel_root() -> None:
+    """A standalone movie (root resolves to itself) stays in a flat folder."""
+    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+    _wire_movie_relative_dir(processor, root_id=55, titles={55: "Some Movie"})
+    rel = await processor._get_movie_relative_dir(55)
+    assert str(rel) == "Some Movie"
+
+
+@pytest.mark.asyncio
+async def test_movie_relative_dir_flat_when_root_matches_movie() -> None:
+    """No duplicate nesting when root and movie render the same folder name."""
+    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+    _wire_movie_relative_dir(
+        processor, root_id=101, titles={55: "Demon Slayer", 101: "Demon Slayer"}
+    )
+    rel = await processor._get_movie_relative_dir(55)
+    assert str(rel) == "Demon Slayer"
+
+
+# ---------------------------------------------------------------------------
+# Franchise-root resolution gating (_resolve_franchise_root)
+# ---------------------------------------------------------------------------
+
+
+def _make_root_db(group_root: int | None, fmt: str) -> MagicMock:
+    db = MagicMock()
+
+    async def get_series_group_by_anilist_id(anilist_id: int):
+        if group_root is None:
+            return None
+        return {"root_anilist_id": group_root}
+
+    async def get_users_by_service(service: str):
+        return [{"user_id": "u1"}]
+
+    async def get_watchlist_entry(user_id: str, anilist_id: int):
+        return {"anilist_format": fmt}
+
+    db.get_series_group_by_anilist_id = get_series_group_by_anilist_id
+    db.get_users_by_service = get_users_by_service
+    db.get_watchlist_entry = get_watchlist_entry
+    return db
+
+
+@pytest.mark.asyncio
+async def test_franchise_root_walks_for_movie_without_group() -> None:
+    """A MOVIE entry with no distinct group root walks the prequel chain."""
+    db = _make_root_db(group_root=None, fmt="MOVIE")
+    app_state = MagicMock()
+    app_state.anilist_client = MagicMock()
+    processor = ArrPostProcessor(
+        db=db, config=_config_with_anilist(), app_state=app_state
+    )
+    with patch(
+        "src.Utils.NamingTranslator.resolve_franchise_root_id",
+        new=AsyncMock(return_value=999),
+    ) as walk:
+        root = await processor._resolve_franchise_root(55)
+    assert root == 999
+    walk.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_franchise_root_skips_walk_for_tv() -> None:
+    """A TV entry with no distinct group root does NOT walk (keeps behaviour)."""
+    db = _make_root_db(group_root=None, fmt="TV")
+    app_state = MagicMock()
+    app_state.anilist_client = MagicMock()
+    processor = ArrPostProcessor(
+        db=db, config=_config_with_anilist(), app_state=app_state
+    )
+    with patch(
+        "src.Utils.NamingTranslator.resolve_franchise_root_id",
+        new=AsyncMock(return_value=999),
+    ) as walk:
+        root = await processor._resolve_franchise_root(55)
+    assert root == 55
+    walk.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_franchise_root_uses_group_root_directly() -> None:
+    """When the group already traces to a distinct root, use it (no walk)."""
+    db = _make_root_db(group_root=101, fmt="TV")
+    processor = ArrPostProcessor(db=db, config=_config_with_anilist())
+    with patch(
+        "src.Utils.NamingTranslator.resolve_franchise_root_id",
+        new=AsyncMock(return_value=999),
+    ) as walk:
+        root = await processor._resolve_franchise_root(55)
+    assert root == 101
+    walk.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Year backfill for folder naming (_ensure_metadata_cached)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ensure_metadata_cached_backfills_missing_year() -> None:
+    """When the cache has no year, fetch from AniList and upsert it."""
+    db = MagicMock()
+
+    async def get_cached_metadata(anilist_id: int):
+        return {"title_romaji": "Kimetsu no Yaiba", "year": 0, "tvdb_id": "145"}
+
+    saved: dict[str, Any] = {}
+
+    async def set_cached_metadata(**kwargs: Any) -> None:
+        saved.update(kwargs)
+
+    db.get_cached_metadata = get_cached_metadata
+    db.set_cached_metadata = set_cached_metadata
+
+    anilist = MagicMock()
+
+    async def get_anime_by_id(aid: int):
+        return {
+            "title": {"romaji": "Kimetsu no Yaiba", "english": "Demon Slayer"},
+            "seasonYear": 2019,
+            "episodes": 26,
+            "coverImage": {"large": ""},
+        }
+
+    anilist.get_anime_by_id = get_anime_by_id
+    app_state = MagicMock()
+    app_state.anilist_client = anilist
+
+    processor = ArrPostProcessor(
+        db=db, config=_config_with_anilist(), app_state=app_state
+    )
+    await processor._ensure_metadata_cached(123)
+
+    assert saved["year"] == 2019
+    # Existing provider IDs must be preserved, not wiped
+    assert saved["tvdb_id"] == "145"
+
+
+@pytest.mark.asyncio
+async def test_ensure_metadata_cached_noop_when_year_present() -> None:
+    """No AniList fetch when a year is already cached."""
+    db = MagicMock()
+
+    async def get_cached_metadata(anilist_id: int):
+        return {"year": 2019}
+
+    db.get_cached_metadata = get_cached_metadata
+    anilist = MagicMock()
+    anilist.get_anime_by_id = AsyncMock()
+    app_state = MagicMock()
+    app_state.anilist_client = anilist
+
+    processor = ArrPostProcessor(
+        db=db, config=_config_with_anilist(), app_state=app_state
+    )
+    await processor._ensure_metadata_cached(123)
+    anilist.get_anime_by_id.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Movie subfolder + collision-safe disambiguation
+# ---------------------------------------------------------------------------
+
+
+def test_disambiguate_keeps_folder_with_year() -> None:
+    out = ArrPostProcessor._disambiguate_movie_folder(
+        "Mugen Ressha-hen (2020)", {"year": 2020}
+    )
+    assert out == "Mugen Ressha-hen (2020)"
+
+
+def test_disambiguate_appends_year_when_missing() -> None:
+    out = ArrPostProcessor._disambiguate_movie_folder(
+        "Mugen Ressha-hen", {"year": 2020}
+    )
+    assert out == "Mugen Ressha-hen (2020)"
+
+
+def test_disambiguate_appends_movie_marker_without_year() -> None:
+    out = ArrPostProcessor._disambiguate_movie_folder("Mugen Ressha-hen", {"year": 0})
+    assert out == "Mugen Ressha-hen [Movie]"
+
+
+@pytest.mark.asyncio
+async def test_entry_subfolder_movie_nested_is_disambiguated() -> None:
+    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+
+    async def fmt(anilist_id: int) -> str:
+        return "MOVIE"
+
+    processor._get_entry_format = fmt  # type: ignore[assignment]
+    processor._get_folder_name = AsyncMock(return_value="Mugen Ressha-hen")  # type: ignore[method-assign]
+
+    show_info = _title_info(title="Demon Slayer")
+    season_info = _title_info(title="Mugen Ressha-hen", year=2020)
+    sub = await processor._get_entry_subfolder(55, 1, show_info, season_info)
+    assert sub == "Mugen Ressha-hen (2020)"
+
+
+@pytest.mark.asyncio
+async def test_entry_subfolder_movie_standalone_is_empty() -> None:
+    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+
+    async def fmt(anilist_id: int) -> str:
+        return "MOVIE"
+
+    processor._get_entry_format = fmt  # type: ignore[assignment]
+    info = _title_info(title="Some Movie", year=2020)
+    # show is season (same object) → standalone → no subfolder
+    sub = await processor._get_entry_subfolder(55, 1, info, info)
+    assert sub == ""
+
+
+@pytest.mark.asyncio
+async def test_entry_subfolder_tv_uses_season_folder() -> None:
+    processor = ArrPostProcessor(db=_make_db(), config=_config_with_anilist())
+
+    async def fmt(anilist_id: int) -> str:
+        return "TV"
+
+    processor._get_entry_format = fmt  # type: ignore[assignment]
+    processor._get_season_folder_name = AsyncMock(return_value="Season 2")  # type: ignore[method-assign]
+
+    show_info = _title_info(title="Demon Slayer")
+    season_info = _title_info(title="Mugen Train Arc", year=2021)
+    sub = await processor._get_entry_subfolder(77, 2, show_info, season_info)
+    assert sub == "Season 2"
+
+
+# ---------------------------------------------------------------------------
+# Tests — sync_sonarr_series_path
+# ---------------------------------------------------------------------------
+
+
+def _make_path_sync_db(
+    library_path: str,
+    *,
+    related: list[int] | None = None,
+    titles: dict[int, dict[str, Any]] | None = None,
+    group_root: int | None = None,
+) -> MagicMock:
+    """Mock DB for path-sync tests.
+
+    ``related`` are extra AniList IDs mapped to the same Sonarr series;
+    ``titles`` maps AniList ID → cached metadata; ``group_root`` makes every
+    entry resolve its show folder from that root entry's title.
+    """
+    db = _make_db(library_path=library_path)
+
+    async def fetch_all(query: str, params: tuple = ()) -> list[dict[str, Any]]:
+        if "season_mapping" in query or "anilist_sonarr_mapping" in query:
+            return [{"anilist_id": aid} for aid in (related or [])]
+        return []
+
+    db.fetch_all = fetch_all
+
+    if titles:
+
+        async def get_cached_metadata(anilist_id: int) -> dict[str, Any] | None:
+            return titles.get(anilist_id)
+
+        db.get_cached_metadata = get_cached_metadata
+
+    if group_root is not None:
+
+        async def get_series_group_by_anilist_id(anilist_id: int) -> dict[str, Any]:
+            return {"root_anilist_id": group_root}
+
+        db.get_series_group_by_anilist_id = get_series_group_by_anilist_id
+
+    return db
+
+
+def _make_path_sync_client(current_path: str) -> MagicMock:
+    """Mock SonarrClient recording update_series_path / rescan_series calls."""
+    client = MagicMock()
+    client.updated_to = []
+    client.rescanned = []
+
+    async def get_series_by_id(series_id: int) -> dict[str, Any]:
+        return {"id": series_id, "title": "Re:ZERO", "path": current_path}
+
+    async def update_series_path(series_id: int, new_path: str) -> dict[str, Any]:
+        client.updated_to.append((series_id, new_path))
+        return {}
+
+    async def rescan_series(series_id: int) -> dict[str, Any]:
+        client.rescanned.append(series_id)
+        return {}
+
+    async def close() -> None:
+        pass
+
+    client.get_series_by_id = get_series_by_id
+    client.update_series_path = update_series_path
+    client.rescan_series = rescan_series
+    client.close = close
+    return client
+
+
+@pytest.mark.asyncio
+async def test_path_sync_repoints_series_at_restructured_folder(tmp_path) -> None:
+    """The core fix: an existing series is repointed at the moved files."""
+    library = tmp_path / "anime"
+    (library / "ReZero kara Hajimeru Isekai Seikatsu").mkdir(parents=True)
+
+    db = _make_path_sync_db(str(library))
+    processor = ArrPostProcessor(db=db, config=_make_config("", ""))
+    client = _make_path_sync_client("/media/tv/Re Zero")
+
+    result = await processor.sync_sonarr_series_path(42, 21234, sonarr=client)
+
+    assert result["action"] == "updated"
+    expected = str(library / "ReZero kara Hajimeru Isekai Seikatsu")
+    assert result["to"] == expected
+    assert client.updated_to == [(42, expected)]
+    assert client.rescanned == [42]  # rescan so Sonarr imports the files
+
+
+@pytest.mark.asyncio
+async def test_path_sync_leaves_sonarr_alone_when_files_not_moved(tmp_path) -> None:
+    """Safety: never repoint at a folder that doesn't exist on disk."""
+    library = tmp_path / "anime"
+    library.mkdir(parents=True)  # library exists, show folder does not
+
+    db = _make_path_sync_db(str(library))
+    processor = ArrPostProcessor(db=db, config=_make_config("", ""))
+    client = _make_path_sync_client("/media/tv/Re Zero")
+
+    result = await processor.sync_sonarr_series_path(42, 21234, sonarr=client)
+
+    assert result["action"] == "target_missing"
+    assert client.updated_to == []
+    assert client.rescanned == []
+
+
+@pytest.mark.asyncio
+async def test_path_sync_noop_when_already_correct(tmp_path) -> None:
+    """A series already at the right path is left untouched."""
+    library = tmp_path / "anime"
+    show = library / "ReZero kara Hajimeru Isekai Seikatsu"
+    show.mkdir(parents=True)
+
+    db = _make_path_sync_db(str(library))
+    processor = ArrPostProcessor(db=db, config=_make_config("", ""))
+    client = _make_path_sync_client(str(show))
+
+    result = await processor.sync_sonarr_series_path(42, 21234, sonarr=client)
+
+    assert result["action"] == "already_correct"
+    assert client.updated_to == []
+
+
+@pytest.mark.asyncio
+async def test_path_sync_translates_container_prefixes(tmp_path) -> None:
+    """The path written to Sonarr is the arr-side path, not our local one."""
+    local_root = tmp_path / "mnt" / "media"
+    (local_root / "ReZero kara Hajimeru Isekai Seikatsu").mkdir(parents=True)
+
+    db = _make_path_sync_db(str(local_root))
+    config = _make_config(
+        sonarr_path_prefix="/data", sonarr_local_prefix=str(local_root)
+    )
+    processor = ArrPostProcessor(db=db, config=config)
+    client = _make_path_sync_client("/data/tv/Re Zero")
+
+    result = await processor.sync_sonarr_series_path(42, 21234, sonarr=client)
+
+    assert result["action"] == "updated"
+    assert result["to"] == "/data/ReZero kara Hajimeru Isekai Seikatsu"
+
+
+@pytest.mark.asyncio
+async def test_path_sync_never_targets_the_library_root(tmp_path) -> None:
+    """A blank title must not resolve the show folder to the library root."""
+    library = tmp_path / "anime"
+    library.mkdir(parents=True)
+
+    db = _make_path_sync_db(str(library), titles={21234: {}})
+    processor = ArrPostProcessor(db=db, config=_make_config("", ""))
+    client = _make_path_sync_client("/media/tv/Re Zero")
+
+    result = await processor.sync_sonarr_series_path(42, 21234, sonarr=client)
+
+    assert result["action"] == "no_title"
+    assert client.updated_to == []
+
+
+@pytest.mark.asyncio
+async def test_path_sync_finds_folder_named_after_series_group_root(tmp_path) -> None:
+    """Linking a sequel finds the folder named after the season 1 entry."""
+    library = tmp_path / "anime"
+    (library / "Attack on Titan").mkdir(parents=True)
+
+    # Adding S4 (id 999); the library folder is named after the S1 root (id 100).
+    db = _make_path_sync_db(
+        str(library),
+        related=[100],
+        titles={
+            999: {"title_romaji": "Shingeki no Kyojin: The Final Season"},
+            100: {"title_romaji": "Attack on Titan"},
+        },
+    )
+    processor = ArrPostProcessor(db=db, config=_make_config("", ""))
+    client = _make_path_sync_client("/media/tv/Shingeki")
+
+    result = await processor.sync_sonarr_series_path(42, 999, sonarr=client)
+
+    assert result["action"] == "updated"
+    assert result["to"] == str(library / "Attack on Titan")
+
+
+@pytest.mark.asyncio
+async def test_path_sync_skipped_without_library_path(tmp_path) -> None:
+    """No configured library means nothing to reconcile against."""
+    db = _make_path_sync_db("")
+    processor = ArrPostProcessor(db=db, config=_make_config("", ""))
+    client = _make_path_sync_client("/media/tv/Re Zero")
+
+    result = await processor.sync_sonarr_series_path(42, 21234, sonarr=client)
+
+    assert result["action"] == "no_library_path"
+    assert client.updated_to == []
+
+
+@pytest.mark.asyncio
+async def test_radarr_path_sync_finds_franchise_nested_movie(tmp_path) -> None:
+    """A movie nested under its franchise root is found at the nested path.
+
+    Mirrors the layout the post-processor files movies into — a flat lookup
+    would miss it and leave Radarr on its stale path.
+    """
+    library = tmp_path / "anime"
+    (library / "Demon Slayer" / "Mugen Train (2020)").mkdir(parents=True)
+
+    db = _make_db(library_path=str(library))
+
+    async def get_cached_metadata(anilist_id: int) -> dict[str, Any]:
+        if anilist_id == 500:
+            return {"title_romaji": "Demon Slayer", "year": 2019}
+        return {"title_romaji": "Mugen Train", "year": 2020}
+
+    async def get_series_group_by_anilist_id(anilist_id: int) -> dict[str, Any]:
+        return {"root_anilist_id": 500}
+
+    db.get_cached_metadata = get_cached_metadata
+    db.get_series_group_by_anilist_id = get_series_group_by_anilist_id
+
+    config = AppConfig(
+        radarr=RadarrConfig(url="http://radarr:7878", api_key="k"),
+    )
+    processor = ArrPostProcessor(db=db, config=config)
+
+    client = MagicMock()
+    client.updated_to = []
+
+    async def get_movie_by_id(movie_id: int) -> dict[str, Any]:
+        return {"id": movie_id, "path": "/old/movies/Mugen Train"}
+
+    async def update_movie_path(movie_id: int, new_path: str) -> dict[str, Any]:
+        client.updated_to.append((movie_id, new_path))
+        return {}
+
+    async def rescan_movie(movie_id: int) -> dict[str, Any]:
+        return {}
+
+    client.get_movie_by_id = get_movie_by_id
+    client.update_movie_path = update_movie_path
+    client.rescan_movie = rescan_movie
+
+    result = await processor.sync_radarr_movie_path(9, 501, radarr=client)
+
+    assert result["action"] == "updated"
+    assert result["to"] == str(library / "Demon Slayer" / "Mugen Train (2020)")
+    assert client.updated_to == [(9, result["to"])]

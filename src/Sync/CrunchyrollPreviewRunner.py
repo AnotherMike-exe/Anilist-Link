@@ -172,6 +172,12 @@ class CrunchyrollPreviewRunner:
         series_progress = self._group_episodes(episodes)
 
         for (series_title, cr_season), cr_episode in series_progress.items():
+            if self._anilist.health.is_down:
+                logger.warning(
+                    "Crunchyroll preview halted — AniList API unavailable (%s)",
+                    self._anilist.health.reason,
+                )
+                break
             try:
                 produced = await self._process_series(
                     series_title, cr_season, cr_episode, user

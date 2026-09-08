@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -10,7 +11,15 @@ from typing import Any
 
 import httpx
 
+from src.Clients.AnilistHealth import (
+    AniListHealth,
+    AniListUnavailableError,
+    looks_like_outage,
+)
+
 logger = logging.getLogger(__name__)
+
+__all__ = ["AniListClient", "AniListUnavailableError", "RateLimiter"]
 
 GRAPHQL_ENDPOINT = "https://graphql.anilist.co"
 OAUTH_AUTHORIZE_URL = "https://anilist.co/api/v2/oauth/authorize"
@@ -20,6 +29,11 @@ MAX_RETRIES = 3  # retries for 5xx / transport errors only
 MAX_RATE_LIMIT_WAITS = 10  # separate budget for 429s (not counted as errors)
 BACKOFF_BASE = 2.0
 SCAN_RESERVE_TOKENS = 3  # tokens reserved for auth/high-priority calls
+
+# Cheapest possible query — used only to test whether AniList is answering
+# again after an outage. Media id 1 (Cowboy Bebop) always exists.
+PROBE_QUERY = "{ Media(id: 1, type: ANIME) { id } }"
+PROBE_TIMEOUT_SECONDS = 15.0
 
 # ---------------------------------------------------------------------------
 # GraphQL query / mutation strings
@@ -384,6 +398,36 @@ class RateLimiter:
 
 
 # ---------------------------------------------------------------------------
+# Response classification helpers
+# ---------------------------------------------------------------------------
+
+
+def _graphql_error_message(text: str) -> str:
+    """Pull the first GraphQL error message out of a response body."""
+    try:
+        body = json.loads(text)
+    except (ValueError, TypeError):
+        return ""
+    errors = body.get("errors") if isinstance(body, dict) else None
+    if isinstance(errors, list) and errors:
+        first = errors[0]
+        if isinstance(first, dict):
+            return str(first.get("message") or "").strip()
+    return ""
+
+
+def _outage_message(status_code: int, text: str) -> str | None:
+    """Return AniList's own outage message, or None if this isn't an outage.
+
+    Distinguishes "AniList turned the API off" (403/503 carrying a known
+    outage phrase) from an ordinary auth or query failure.
+    """
+    if not looks_like_outage(status_code, text):
+        return None
+    return _graphql_error_message(text) or "AniList API is temporarily disabled"
+
+
+# ---------------------------------------------------------------------------
 # AniList Client
 # ---------------------------------------------------------------------------
 
@@ -396,6 +440,7 @@ class AniListClient:
         client_id: str,
         client_secret: str,
         redirect_uri: str = "",
+        health: AniListHealth | None = None,
     ) -> None:
         self._client_id = client_id
         self._client_secret = client_secret
@@ -408,6 +453,11 @@ class AniListClient:
             },
         )
         self._limiter = RateLimiter()
+        # Shared availability tracker. Callers (jobs, syncers, the web UI)
+        # read this to decide whether to start work at all; the request loop
+        # below writes to it. Injectable so every component in the process
+        # observes the same outage.
+        self.health = health or AniListHealth()
         self.on_rate_limit_wait: Callable[[int], None] | None = None
 
     async def close(self) -> None:
@@ -681,6 +731,70 @@ class AniListClient:
         return data.get("SaveMediaListEntry", {})
 
     # ------------------------------------------------------------------
+    # Availability
+    # ------------------------------------------------------------------
+
+    def _record_reported_limit(self, headers: httpx.Headers) -> None:
+        """Feed the server's advertised rate limit into the health tracker.
+
+        AniList drops this from 90 to a lower ceiling when it is under
+        strain; surfacing it lets the dashboard warn before users wonder
+        why scans crawled to a halt.
+        """
+        raw_limit = headers.get("X-RateLimit-Limit")
+        if not raw_limit:
+            return
+        try:
+            self.health.record_rate_limit(int(raw_limit))
+        except (TypeError, ValueError):
+            pass
+
+    async def probe(self) -> bool:
+        """Send one cheap query to check whether AniList is answering again.
+
+        Deliberately bypasses the retry loop in :meth:`_execute_query`: a
+        probe is a single request, and the interval between probes is owned
+        by :class:`~src.Clients.AnilistHealth.AniListHealth`. Returns True
+        when the API responded, which also clears any recorded outage.
+        """
+        self.health.record_probe_attempt()
+        logger.info("Probing AniList API for recovery")
+
+        try:
+            resp = await self._http.post(
+                GRAPHQL_ENDPOINT,
+                json={"query": PROBE_QUERY},
+                headers={"Content-Type": "application/json"},
+                timeout=PROBE_TIMEOUT_SECONDS,
+            )
+        except httpx.HTTPError as exc:
+            self.health.record_outage(
+                "Cannot reach AniList (network error)", str(exc)[:300]
+            )
+            return False
+
+        self._limiter.update_from_headers(resp.headers)
+        self._record_reported_limit(resp.headers)
+        body_snippet = (resp.text or "")[:300] or "(empty)"
+
+        if resp.status_code == 429:
+            # Throttled, but answering — the API is up.
+            retry_after = max(int(resp.headers.get("Retry-After", "60")), 5)
+            self.health.record_throttled(retry_after)
+            self.health.record_success()
+            return True
+
+        if resp.status_code == 200:
+            self.health.record_success()
+            return True
+
+        outage = _outage_message(resp.status_code, resp.text or "")
+        self.health.record_outage(
+            outage or f"AniList returned HTTP {resp.status_code}", body_snippet
+        )
+        return False
+
+    # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
@@ -690,7 +804,14 @@ class AniListClient:
         variables: dict[str, Any],
         access_token: str | None = None,
         high_priority: bool = False,
+        bypass_circuit: bool = False,
     ) -> dict[str, Any]:
+        # Fail fast while AniList is known to be offline. Without this every
+        # caller in the container re-discovers the outage on its own, three
+        # retries at a time — exactly the hammering we want to avoid.
+        if not bypass_circuit:
+            self.health.raise_if_down()
+
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if access_token:
             headers["Authorization"] = f"Bearer {access_token}"
@@ -708,6 +829,16 @@ class AniListClient:
                     headers=headers,
                 )
                 self._limiter.update_from_headers(resp.headers)
+                self._record_reported_limit(resp.headers)
+
+                # AniList advertising its own outage — stop immediately.
+                # Retrying a deliberately disabled API only adds load.
+                outage = _outage_message(resp.status_code, resp.text or "")
+                if outage:
+                    self.health.record_outage(
+                        outage, (resp.text or "")[:300] or "(empty)"
+                    )
+                    self.health.raise_if_down()
 
                 if resp.status_code == 403:
                     error_retries += 1
@@ -718,6 +849,15 @@ class AniListClient:
                             MAX_RETRIES,
                             body_snippet,
                         )
+                        # A public (unauthenticated) query that keeps getting
+                        # 403 means AniList is refusing everyone, not that one
+                        # user's token went stale — treat it as an outage.
+                        if not access_token:
+                            self.health.record_outage(
+                                "AniList is rejecting requests (HTTP 403)",
+                                body_snippet,
+                            )
+                            self.health.raise_if_down()
                         resp.raise_for_status()
                     wait = BACKOFF_BASE**error_retries
                     logger.warning(
@@ -733,16 +873,25 @@ class AniListClient:
                 if resp.status_code == 429:
                     rate_limit_waits += 1
                     body_snippet = resp.text[:300] if resp.text else "(empty)"
+                    retry_after = int(resp.headers.get("Retry-After", "60"))
+                    retry_after = max(retry_after, 5)
+                    self.health.record_throttled(retry_after)
+
                     if rate_limit_waits > MAX_RATE_LIMIT_WAITS:
                         logger.error(
                             "Exceeded %d rate-limit waits, giving up. " "Body: %s",
                             MAX_RATE_LIMIT_WAITS,
                             body_snippet,
                         )
-                        return {}
-
-                    retry_after = int(resp.headers.get("Retry-After", "60"))
-                    retry_after = max(retry_after, 5)
+                        # Sustained throttling this deep means AniList is not
+                        # letting us work at all; halt and let the recovery
+                        # probe decide when it is worth trying again.
+                        self.health.record_outage(
+                            "AniList is rate limiting every request "
+                            f"(429 after {MAX_RATE_LIMIT_WAITS} waits)",
+                            body_snippet,
+                        )
+                        self.health.raise_if_down()
                     logger.warning(
                         "Rate limited (wait %d/%d). Sleeping %ds. "
                         "Headers: remaining=%s, limit=%s, reset=%s. "
@@ -777,7 +926,12 @@ class AniListClient:
                             resp.status_code,
                             body_snippet,
                         )
-                        return {}
+                        self.health.record_outage(
+                            "AniList is returning server errors "
+                            f"(HTTP {resp.status_code})",
+                            body_snippet,
+                        )
+                        self.health.raise_if_down()
                     wait = BACKOFF_BASE**error_retries
                     logger.warning(
                         "Server error %d, retrying in %.1fs. Body: %s",
@@ -798,6 +952,10 @@ class AniListClient:
                 resp.raise_for_status()
                 body = resp.json()
 
+                # A parsed response means AniList is alive, even if this
+                # particular query had GraphQL-level errors.
+                self.health.record_success()
+
                 if "errors" in body and body["errors"]:
                     logger.error("GraphQL errors: %s", body["errors"])
 
@@ -806,6 +964,10 @@ class AniListClient:
             except httpx.TransportError as exc:
                 error_retries += 1
                 if error_retries > MAX_RETRIES:
+                    self.health.record_outage(
+                        "Cannot reach AniList (network error)", str(exc)[:300]
+                    )
+                    self.health.raise_if_down()
                     raise
                 wait = BACKOFF_BASE**error_retries
                 logger.warning("Transport error: %s, retrying in %.1fs", exc, wait)

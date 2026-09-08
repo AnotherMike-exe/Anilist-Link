@@ -104,14 +104,14 @@
     <div class="meta-item">
         <div class="meta-label">Created</div>
         <div class="meta-value" style="font-size:0.8rem">
-            {{ plan.created_at.split('T')[0] if 'T' in plan.created_at else plan.created_at.split(' ')[0] }}
+            {{ plan.created_at | localdate }}
         </div>
     </div>
     {% if plan.applied_at %}
     <div class="meta-item">
         <div class="meta-label">Applied</div>
         <div class="meta-value" style="font-size:0.8rem">
-            {{ plan.applied_at.split('T')[0] if 'T' in plan.applied_at else plan.applied_at.split(' ')[0] }}
+            {{ plan.applied_at | localdate }}
         </div>
     </div>
     {% endif %}

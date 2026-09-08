@@ -9,6 +9,7 @@ A self-hosted Docker container that bridges AniList with Plex, Jellyfin, and Cru
 - **Watch Sync** — Sync watch progress between Crunchyroll, Plex, Jellyfin, and AniList (bidirectional for Plex/Jellyfin)
 - **Download Management** — Add anime to Sonarr/Radarr with AniList alternative titles
 - **Rate Your Completed Shows** — Dashboard nudge for AniList entries marked Completed but never rated, with one-click rating in your account's configured scale (stars, 10-point, 100-point, etc.); optional [Glance](https://github.com/glanceapp/glance) dashboard widget
+- **AniList outage handling** — Detects when AniList disables its API or reduces its rate limit, pauses all syncs and scans instead of hammering it, shows a dashboard banner with how long it has been down, and resumes automatically once it recovers
 - Per-user AniList account linking via OAuth2
 - Web dashboard for configuration, mapping review, sync monitoring, and onboarding
 
@@ -135,6 +136,7 @@ The key is required — `/glance/rate-completed` is the one endpoint in this app
 - **AniList OAuth2** — Register your app at [anilist.co/settings/developer](https://anilist.co/settings/developer) to obtain `ANILIST_CLIENT_ID` and `ANILIST_CLIENT_SECRET`.
 - **Logs** — View with `docker logs AnilistLink` or tail the file at `/config/logs/anilist_link.log` inside the container.
 - **Permissions** — `PUID`/`PGID` must match the owner of your media files on the host, otherwise renames will fail with permission errors.
+- **AniList downtime** — When AniList takes its API offline, a banner appears at the top of the dashboard and background work pauses. Anilist-Link re-checks on its own once an hour (and once on startup); **Check now** in the banner forces an immediate re-check. Nothing needs restarting — jobs resume on their next scheduled run.
 
 ---
 

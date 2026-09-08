@@ -67,8 +67,54 @@ GraphQL client handling all AniList interactions:
 - **OAuth2 flow**: authorization URL generation, token exchange, viewer profile fetch (also caches `Viewer.mediaListOptions.scoreFormat` at link time, self-healing refresh every 24h via `WatchlistRefresh`)
 - **Rate limiting**: token-bucket algorithm (90 capacity, 1.5/sec refill rate) — see `RateLimiter` class
 - **Retry logic**: exponential backoff on 429 and 5xx responses
+- **Availability circuit breaker**: see 3.1.1
 
 Used by: All 4 pillars
+
+#### 3.1.1. API Availability Handling (`src/Clients/AnilistHealth.py`, `src/Sync/AnilistHealthMonitor.py`)
+
+**Status**: Fully implemented
+
+AniList periodically switches its public API off entirely (HTTP 403 — *"The
+AniList API has been temporarily disabled due to severe stability issues."*)
+or leaves it up with a reduced rate limit (30 req/min instead of 90). Without
+a shared view of that, every scan, sync and refresh in the container
+rediscovered the outage on its own, three retries at a time.
+
+`AniListHealth` is a single tracker shared by the whole process (created in
+`Main.py`, injected into `AniListClient`). It stores only facts — last
+success, last failure, the server's advertised rate limit — and derives one
+of three states:
+
+| State | Meaning | Effect |
+|-------|---------|--------|
+| `ok` | Normal operation | — |
+| `degraded` | Reduced rate-limit ceiling, or recent 429s | Warning banner; work continues (slower) |
+| `down` | API disabled, unreachable, persistent 5xx, or sustained 429s | Circuit open — all AniList calls fail fast |
+
+**Fail fast, then probe.** While `down`, `_execute_query()` raises
+`AniListUnavailableError` *before* issuing a request. Recovery is detected by
+`AniListClient.probe()` — a single cheap `Media(id: 1)` query issued by the
+health monitor once an hour (`PROBE_INTERVAL_SECONDS`), never by whichever
+job happens to run next. A 429 on a probe counts as "alive". AniList outages
+run for hours, so checking more often buys nothing — anyone at the dashboard
+who wants an immediate answer uses the banner's **Check now** button. The one
+exception is a container restart, which makes a probe due immediately rather
+than carrying a possibly-stale outage for up to an hour.
+
+**Halting work.** Scheduled jobs check `anilist_available()` (`Main.py`) and
+skip; the Plex/Jellyfin scanners, `WatchSyncer` and `DownloadSyncer` break out
+of their per-item loops rather than marking every remaining item unmatched;
+the watchlist refresh and the synonyms backfill stop early.
+
+**Surfacing it.** `GET /api/anilist/status` feeds an always-visible banner in
+`base.html` (polled every 60s, counters tick locally in between) showing the
+reason, total downtime, and the countdown to the next check, with a **Check
+now** button (`POST /api/anilist/check-now`). Outage state is persisted to
+`app_settings` under `anilist.health`, so a container restart reports the true
+downtime instead of resetting to zero. Recovery posts a dismissible dashboard
+notification. Any route handler that touches a down API returns `503` via an
+app-level exception handler rather than a bare `500`.
 
 ### 3.2. Title Matcher (`src/Matching/TitleMatcher.py`, `src/Matching/Normalizer.py`)
 
@@ -131,6 +177,7 @@ FastAPI application with Jinja2 templates:
 - **Onboarding** (`/onboarding`): 4-step setup wizard for new users
 - **Connection Tests** (`/api/test/*`): Live connection validation for all services
 - **Floating progress widget**: In `base.html`, polls `GET /api/progress` every 2s for background task feedback
+- **AniList status banner**: In `base.html`, polls `GET /api/anilist/status` every 60s; shows an outage/reduced-rate-limit bar with live downtime, next-check countdown, and a **Check now** action. See 3.1.1
 - **Rate Your Completed Shows**: Dashboard card listing AniList `COMPLETED` entries with `score == 0`; rating submits via `SaveMediaListEntry(score)` and updates locally. Toggle: `app.show_unrated_completed` (Settings + Onboarding, default on). Shared rating control (`rating-widget.js`) adapts to the account's `scoreFormat`.
 - **Glance integration** (`/glance/rate-completed`): Standalone, iframe-sized page exposing the same unrated-completed list + rating action for embedding in a [Glance](https://github.com/glanceapp/glance) dashboard. Gated by a shared API key (`glance.api_key`) generated from Settings — the only credentialed endpoint in an otherwise local-network-trust app.
 
@@ -144,6 +191,7 @@ APScheduler integration for periodic background tasks. `JobScheduler` class wrap
 - Job status query via `get_job_status()`
 - Registered jobs: Crunchyroll watch sync, Plex/Jellyfin metadata scan, watch sync, download sync, watchlist refresh
 - `watchlist_refresh` (`src/Sync/WatchlistRefresh.py`): refreshes `user_watchlist` for all linked AniList accounts; runs every 30 min (configurable via `WATCHLIST_REFRESH_INTERVAL`), fires on startup, and is triggered automatically after Crunchyroll sync completes or preview changes are applied
+- `anilist_health_monitor` (`src/Sync/AnilistHealthMonitor.py`): asyncio loop started in the app lifespan (not APScheduler). Idle while AniList is healthy; probes for recovery hourly during an outage and persists state transitions. See 3.1.1
 
 ### 3.8. Config (`src/Utils/Config.py`)
 
@@ -210,6 +258,36 @@ The recommended output structure (Structure A) is one folder per AniList entry:
 - `POST /restructure/execute` — Execute approved file moves
 - `GET /restructure/results` — Show results and any errors
 - `GET /restructure/report` — Audit log of past restructures
+- `POST /api/smart-move/preview`, `POST /api/smart-move/execute` — **Smart Move
+  (Fix Location)**: run the restructurer on a *single* library item that isn't
+  tracked in Sonarr/Radarr. Builds a one-element `ShowInput` from the
+  `library_items` row, analyzes with `force_franchise_root=True`, and (on
+  execute) relocates just that item, re-points the row + local mapping, and
+  triggers a media-server refresh. Surfaced as a per-item "Fix Location" button
+  on the Library detail and watchlist pages.
+
+### 4.6. Franchise-root nesting for movies
+
+A franchise movie (e.g. a Demon Slayer film) should nest under its series-group
+ROOT folder alongside the TV seasons (Structure A), not sit in a separate
+top-level directory. Both movers resolve the franchise root the same way:
+
+1. Use the series group's `root_anilist_id` when it already traces to a
+   *distinct* root.
+2. Otherwise walk the AniList **PREQUEL** chain back to the base
+   (`resolve_franchise_root_id` in `NamingTranslator`) — this recovers the root
+   even when the stored group is stale/self-rooted.
+
+- **Restructurer** (`LibraryRestructurer._analyze_full_restructure`): a lone
+  franchise entry nests under the rendered root folder; the walk is gated to
+  MOVIE format during a full library pass but forced for the single-item Smart
+  Move. A relocation to a new parent counts as a change even when the folder
+  name is unchanged (full-path comparison, not basename).
+- **Arr post-processor** (`ArrPostProcessor`): Sonarr/Radarr "Move to Library"
+  nests the movie under the root, gives it its own title folder (not a season
+  folder) with a collision-safe backup so it can't clash with a same-named TV
+  season, backfills the root's cached year, writes the group `tvshow.nfo`, and
+  prunes the orphaned source folder (`prune_orphaned_dir`).
 
 ---
 
@@ -653,7 +731,28 @@ Anilist-Link/
 
 New `app_settings` keys for the Rate Your Completed Shows / Glance feature: `anilist.score_format`, `anilist.score_format_updated_at`, `app.show_unrated_completed`, `glance.api_key` — no schema migration required, `user_watchlist.score` already existed in the v1 baseline.
 
-### 10.2. In-Memory Cache
+### 10.2. Timestamps & Timezones
+
+**All timestamps are stored in UTC.** Every `created_at` / `applied_at` /
+`executed_at` / `synced_at` column defaults to SQLite's `datetime('now')`, and
+the Python writers use `datetime.now(timezone.utc)`. Nothing in the database is
+local time.
+
+Conversion happens once, at render time:
+
+| Layer | Responsibility |
+|-------|----------------|
+| `src/Utils/Time.py` | `get_timezone()` resolves `TZ` (via `zoneinfo`, falling back to system local then UTC); `parse_utc()` accepts both the SQLite `YYYY-MM-DD HH:MM:SS` form and ISO-8601 with `T`/`Z`/offsets; `to_local()` / `to_local_date()` format in the configured zone |
+| `src/Web/App.py` | Registers the `localtime` and `localdate` Jinja filters bound to `config.timezone` |
+| Templates | Render every stored timestamp through `\| localtime` or `\| localdate` — never raw |
+| `src/Scheduler/Jobs.py` | `AsyncIOScheduler` and every `CronTrigger` are constructed with an explicit `tzinfo` rather than letting APScheduler guess via tzlocal |
+| `Dockerfile` / `entrypoint.sh` | Install `tzdata` and point `/etc/localtime` + `/etc/timezone` at `$TZ` so the zone resolves at all |
+
+Rendering a stored value raw is the bug this exists to prevent: a job that ran at
+02:00 America/Los_Angeles is stored as 09:00 UTC and, printed unconverted, shows
+as an hour that has not happened yet.
+
+### 10.3. In-Memory Cache
 
 Short-lived caching of frequently accessed data during active scan/sync operations. Rate limit state is maintained in the `RateLimiter` instance on the `AniListClient`.
 

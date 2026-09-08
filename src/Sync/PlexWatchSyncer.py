@@ -99,6 +99,12 @@ class PlexWatchSyncer(WatchSyncBase):
             return results
 
         for mapping in mappings:
+            if self._anilist.health.is_down:
+                logger.warning(
+                    "Plex watch sync halted — AniList API unavailable (%s)",
+                    self._anilist.health.reason,
+                )
+                break
             try:
                 await self._process_mapping_to_anilist(
                     mapping, anilist_user_id, access_token, results

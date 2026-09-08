@@ -10,7 +10,7 @@
                 onchange="window.location='/crunchyroll/preview?run_id='+this.value">
             {% for run in runs %}
             <option value="{{ run.run_id }}" {% if run.run_id == run_id %}selected{% endif %}>
-                {{ run.created_at[:16] if run.created_at else run.run_id[:8] }}
+                {{ (run.created_at | localtime)[:16] if run.created_at else run.run_id[:8] }}
                 — {{ run.entry_count }} entries
             </option>
             {% endfor %}

@@ -207,6 +207,12 @@ class WatchSyncer:
         series_progress = self._group_episodes_by_series_and_season(episodes)
 
         for (series_title, cr_season), latest_episode in series_progress.items():
+            if self._anilist.health.is_down:
+                logger.warning(
+                    "Crunchyroll sync halted — AniList API unavailable (%s)",
+                    self._anilist.health.reason,
+                )
+                break
             try:
                 for user in users:
                     success = await self._process_series_entry(

@@ -17,6 +17,7 @@ import json
 import logging
 
 from src.Clients.AnilistClient import AniListClient
+from src.Clients.AnilistHealth import AniListUnavailableError
 from src.Database.Connection import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,14 @@ async def backfill_cache_synonyms(
         anilist_id = row["anilist_id"]
         try:
             entry = await anilist_client.get_anime_by_id(anilist_id)
+        except AniListUnavailableError as exc:
+            # Nothing to gain from walking the rest of the table while the
+            # API is offline — the monitor will not restart this backfill,
+            # but the next container start will pick up where it left off.
+            logger.warning(
+                "Synonyms backfill stopped after %d row(s) — %s", updated, exc
+            )
+            break
         except Exception:
             logger.debug(
                 "Synonyms backfill: AniList fetch failed for %d",

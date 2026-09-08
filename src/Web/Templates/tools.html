@@ -89,7 +89,12 @@
     </div>
     <div class="tool-card-body">
       <h2>Sonarr / Radarr</h2>
-      <p>Send add requests to Sonarr/Radarr using AniList alternative titles for better matching.</p>
+      <p>Sends add requests to Sonarr (series) and Radarr (movies) straight from your AniList
+         watchlist. AniList synonyms are pushed as alternate titles so indexers match anime
+         releases that don't use the TVDB name.</p>
+      <p style="margin-top:0.4rem">After a download completes, the webhook receiver renames and
+         files episodes into your library's AniList naming structure, then points Sonarr/Radarr
+         at the new location so nothing shows as missing.</p>
       {% if downloads_configured %}
       {% if download_count > 0 %}
       <p class="tool-card-meta">{{ download_count }} request{{ 's' if download_count != 1 else '' }} made</p>
@@ -105,6 +110,24 @@
       <a href="/download" class="btn btn-primary">Open</a>
     </div>
     {% endif %}
+  </div>
+
+  <!-- Import — media acquired by hand -->
+  <div class="tool-card">
+    <div class="tool-card-icon">📥</div>
+    <div class="tool-card-body">
+      <h2>Import</h2>
+      <p>Bring in media you fetched yourself — the cases Sonarr and Radarr can't find a
+         release for, like a season AniList splits but TVDB doesn't.</p>
+      <p style="margin-top:0.4rem">Drop files in the import folder, review the AniList match,
+         and they're renamed and filed like any restructure — then Sonarr/Radarr is told
+         where they landed so the episodes stop showing as missing.</p>
+      <p class="tool-card-meta">Per-entry "Re-scan Folder" on the watchlist does the same
+         for files dropped straight into a show's own folder.</p>
+    </div>
+    <div class="tool-card-actions">
+      <a href="/import" class="btn btn-primary">Open</a>
+    </div>
   </div>
 
   <!-- Fallback if nothing configured -->

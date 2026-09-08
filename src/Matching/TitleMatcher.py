@@ -407,7 +407,13 @@ class TitleMatcher:
 
         tv_series.sort(key=lambda x: x["release_order"])
 
-        season_num = 1
+        def next_free_slot(start: int) -> int:
+            slot = max(start, 1)
+            while slot in season_structure:
+                slot += 1
+            return slot
+
+        next_sequential = 1
         for series_data in tv_series:
             result = series_data["entry"]
 
@@ -416,8 +422,9 @@ class TitleMatcher:
             if series_data["has_explicit_season"] and detected_season > 1:
                 actual_season = detected_season
             else:
-                actual_season = season_num
-                season_num += 1
+                next_sequential = next_free_slot(next_sequential)
+                actual_season = next_sequential
+                next_sequential += 1
 
             sim = self.calculate_title_similarity(series_title, result)
             if series_data["is_space_removed_match"]:
@@ -429,7 +436,9 @@ class TitleMatcher:
 
             if actual_season not in season_structure:
                 should_add = True
-            else:
+            elif _is_same_broadcast(result, season_structure[actual_season]["entry"]):
+                # Two AniList entries for one broadcast (e.g. an ONA listing and
+                # a TV listing) — keep the better of the two.
                 existing_entry = season_structure[actual_season]["entry"]
                 existing_format = existing_entry.get("format", "").upper()
 
@@ -444,6 +453,22 @@ class TitleMatcher:
                         "Replacing with higher similarity entry for Season %d",
                         actual_season,
                     )
+            else:
+                # A genuinely different release wants a slot that is already
+                # taken. Dropping it silently is what hid Mushoku Tensei II and
+                # III from the season map, leaving CR season 3 with nowhere to
+                # go. Entries arrive in release order, so the next free slot
+                # keeps the structure chronological.
+                claimed = actual_season
+                actual_season = next_free_slot(actual_season)
+                should_add = True
+                logger.debug(
+                    "Season %d already held by %s — placing %s at Season %d",
+                    claimed,
+                    season_structure[claimed]["title"],
+                    series_data["title"],
+                    actual_season,
+                )
 
             if should_add:
                 season_structure[actual_season] = {
@@ -613,12 +638,19 @@ class TitleMatcher:
                 return sd["entry"], cr_season, capped_episode
             return sd["entry"], cr_season, cr_episode
 
-        # Season 1 fallback
-        if 1 in season_structure:
-            sd = season_structure[1]
-            logger.warning("Falling back to Season 1 for %s", series_title)
-            return sd["entry"], 1, cr_episode
-
+        # No slot for this CR season, and the episode number did not resolve as
+        # absolute either. Folding it onto Season 1 (the previous behaviour)
+        # writes a later season's episode number onto the Season 1 AniList
+        # entry — Mushoku Tensei season 3 episode 10 landed on entry 108465
+        # (season 1, 11 episodes) and would have marked season 1 COMPLETED.
+        # Reporting no match is always safer than updating the wrong entry.
+        logger.warning(
+            "No AniList entry for %s season %d (season map covers seasons %s) "
+            "— refusing to fall back to Season 1",
+            series_title,
+            cr_season,
+            ", ".join(str(sn) for sn in sorted_seasons),
+        )
         return None, 0, 0
 
 
@@ -730,6 +762,20 @@ def _has_explicit_season_number(entry: dict[str, Any]) -> bool:
     return False
 
 
+def _is_same_broadcast(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Whether two entries are duplicate listings of one broadcast.
+
+    Used to tell an ONA/TV pair for the same season apart from two different
+    cours of a franchise: separate cours are seasons apart, duplicate listings
+    share a start month.
+    """
+    sa = a.get("startDate") or {}
+    sb = b.get("startDate") or {}
+    if not sa.get("year") or not sb.get("year"):
+        return False
+    return sa.get("year") == sb.get("year") and sa.get("month") == sb.get("month")
+
+
 def _detect_season_from_anilist_entry(entry: dict[str, Any], base_title: str) -> int:
     """Detect which season number an AniList entry represents."""
     title_obj = entry.get("title", {})
@@ -740,11 +786,16 @@ def _detect_season_from_anilist_entry(entry: dict[str, Any], base_title: str) ->
         if not title:
             continue
 
+        # A Roman numeral outranks "Part N": in "Mushoku Tensei II: Isekai
+        # Ittara Honki Dasu Part 2" the II is the season and the Part is the
+        # cour within it. Checking "Part N" first reported season 2 for every
+        # cour-2 entry in the franchise, so "Mushoku Tensei III … Part 2"
+        # would claim season 2 instead of season 3.
         patterns: list[tuple[str, int]] = [
+            (r"\b(?:II|III|IV|V|VI)\b", 0),
             (r"(\d+)(?:st|nd|rd|th)\s+Season", 1),
             (r"Season\s+(\d+)", 1),
             (r"\bPart\s+(\d+)", 1),
-            (r"\b(?:II|III|IV|V|VI)\b", 0),
         ]
 
         for pattern, group in patterns:

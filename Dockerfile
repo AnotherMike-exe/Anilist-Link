@@ -16,11 +16,14 @@ FROM python:3.11-slim-bookworm
 WORKDIR /app
 
 # Install Chromium and chromedriver for Crunchyroll Selenium auth.
+# tzdata provides /usr/share/zoneinfo so the TZ variable resolves to a real
+# zone; without it TZ is ignored and every timestamp renders as UTC.
 # gosu lets the entrypoint drop from root to PUID:PGID so files written into
 # the media library are owned by the same user as Sonarr/Radarr (not root).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium chromium-driver \
     gosu \
+    tzdata \
     fonts-liberation \
     libnss3 \
     libxss1 \

@@ -677,13 +677,20 @@ TABLES: dict[str, str] = {
             UNIQUE(user_id, anilist_id)
         )
     """,
+    # A Sonarr season can hold more than one AniList entry: split cours (e.g.
+    # Mushoku Tensei S2 Part 1 + Part 2) are two AniList entries inside a single
+    # Sonarr season.  The episode range says which part of the season an entry
+    # covers, in the season's own episode numbering.  episode_end NULL means
+    # "to the end of the season", which is the whole-season 1:1 case.
     "anilist_sonarr_season_mapping": """
         CREATE TABLE IF NOT EXISTS anilist_sonarr_season_mapping (
             sonarr_id     INTEGER NOT NULL,
             season_number INTEGER NOT NULL,
             anilist_id    INTEGER NOT NULL,
+            episode_start INTEGER NOT NULL DEFAULT 1,
+            episode_end   INTEGER,
             created_at    TEXT DEFAULT (datetime('now')),
-            PRIMARY KEY (sonarr_id, season_number)
+            PRIMARY KEY (sonarr_id, season_number, episode_start)
         )
     """,
     "anilist_arr_skip": """

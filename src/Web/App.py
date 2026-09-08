@@ -6,19 +6,22 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from src.Clients.AnilistClient import AniListClient
+from src.Clients.AnilistHealth import AniListUnavailableError
 from src.Database.Connection import DatabaseManager
 from src.Scheduler.Jobs import JobScheduler
+from src.Sync.AnilistHealthMonitor import anilist_health_monitor
 from src.Sync.CacheSynonymsBackfill import backfill_cache_synonyms
 from src.Sync.WatchlistRefresh import watchlist_activity_loop
 from src.Utils.Config import AppConfig
+from src.Utils.Time import to_local, to_local_date
 from src.Web.ActivityTracker import ActivityTracker
 
 logger = logging.getLogger(__name__)
@@ -75,6 +78,15 @@ def create_app(
         # Auto-register arr webhooks (fire-and-forget, non-blocking)
         asyncio.create_task(_register_arr_webhooks(config))
 
+        # AniList availability monitor: restores any outage recorded before
+        # a restart, probes for recovery on a backoff schedule, and keeps
+        # the persisted state in sync. Idle while AniList is healthy.
+        health_task = asyncio.create_task(
+            anilist_health_monitor(db, anilist_client),
+            name="anilist-health-monitor",
+        )
+        app.state.anilist_health_task = health_task
+
         # One-shot backfill for anilist_cache.synonyms — runs in the
         # background after the schema-v3 migration so existing cached rows
         # eventually get synonyms populated without requiring users to
@@ -102,6 +114,8 @@ def create_app(
         # Shutdown
         if not loop_task.done():
             loop_task.cancel()
+        if not health_task.done():
+            health_task.cancel()
         jf_listener = getattr(app.state, "jellyfin_listener", None)
         if jf_listener:
             logger.info("Stopping Jellyfin WebSocket listener")
@@ -127,18 +141,16 @@ def create_app(
     app.state.activity_tracker = ActivityTracker()
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-    def _utc_to_local(utc_str: str) -> str:
-        """Convert a UTC datetime string from SQLite to the container's local time."""
-        if not utc_str:
-            return utc_str
-        try:
-            dt = datetime.strptime(utc_str[:19], "%Y-%m-%d %H:%M:%S")
-            dt_local = dt.replace(tzinfo=timezone.utc).astimezone()
-            return dt_local.strftime("%Y-%m-%d %H:%M:%S")
-        except (ValueError, TypeError):
-            return utc_str
+    # All stored timestamps are UTC; render them in the TZ the operator
+    # configured so scheduled runs do not appear hours in the future.
+    def _localtime(value: object) -> str:
+        return to_local(value, tz_name=config.timezone)  # type: ignore[arg-type]
 
-    templates.env.filters["localtime"] = _utc_to_local
+    def _localdate(value: object) -> str:
+        return to_local_date(value, tz_name=config.timezone)  # type: ignore[arg-type]
+
+    templates.env.filters["localtime"] = _localtime
+    templates.env.filters["localdate"] = _localdate
     app.state.templates = templates
     app.state.background_tasks = set()  # prevent GC of fire-and-forget tasks
     # Map of task_key -> asyncio.Task for cancellable long-running ops.
@@ -154,8 +166,26 @@ def create_app(
     _BACKGROUND_POLL_PATHS = {
         "/api/progress",
         "/api/notifications",
+        "/api/anilist/status",
         "/health",
     }
+
+    # Any handler that reaches AniList while it is down gets a fail-fast
+    # AniListUnavailableError instead of a hung retry loop. Translate it into
+    # a 503 so the UI shows the outage reason rather than a bare 500.
+    @app.exception_handler(AniListUnavailableError)
+    async def _anilist_unavailable_handler(  # type: ignore[no-untyped-def]
+        request: Request, exc: AniListUnavailableError
+    ):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "error": "AniList API is unavailable — this action is paused.",
+                "reason": exc.reason,
+                "down_seconds": round(exc.down_seconds),
+            },
+        )
 
     @app.middleware("http")
     async def _track_activity(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -169,6 +199,7 @@ def create_app(
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     # Register routers
+    from src.Web.Routes.AnilistStatus import router as anilist_status_router
     from src.Web.Routes.ArrWebhook import router as arr_webhook_router
     from src.Web.Routes.Auth import router as auth_router
     from src.Web.Routes.ConnectionTest import router as connection_test_router
@@ -176,6 +207,7 @@ def create_app(
     from src.Web.Routes.Dashboard import router as dashboard_router
     from src.Web.Routes.Downloads import router as downloads_router
     from src.Web.Routes.Glance import router as glance_router
+    from src.Web.Routes.Import import router as import_router
     from src.Web.Routes.JellyfinLibrary import router as jellyfin_library_router
     from src.Web.Routes.JellyfinScan import router as jellyfin_scan_router
     from src.Web.Routes.JellyfinWebhook import router as jellyfin_webhook_router
@@ -187,12 +219,14 @@ def create_app(
     from src.Web.Routes.PlexScan import router as plex_scan_router
     from src.Web.Routes.Restructure import router as restructure_router
     from src.Web.Routes.Settings import router as settings_router
+    from src.Web.Routes.SmartMove import router as smart_move_router
     from src.Web.Routes.SonarrSync import router as sonarr_sync_router
     from src.Web.Routes.Tools import router as tools_router
     from src.Web.Routes.UnifiedLibrary import router as unified_library_router
     from src.Web.Routes.WatchlistLibrary import router as watchlist_library_router
     from src.Web.Routes.WatchSync import router as watch_sync_router
 
+    app.include_router(anilist_status_router)
     app.include_router(arr_webhook_router)
     app.include_router(downloads_router)
     app.include_router(auth_router)
@@ -202,6 +236,7 @@ def create_app(
     app.include_router(cr_sync_router)
     app.include_router(dashboard_router)
     app.include_router(glance_router)
+    app.include_router(import_router)
     app.include_router(jellyfin_library_router)
     app.include_router(jellyfin_scan_router)
     app.include_router(jellyfin_webhook_router)
@@ -213,6 +248,7 @@ def create_app(
     app.include_router(plex_scan_router)
     app.include_router(restructure_router)
     app.include_router(settings_router)
+    app.include_router(smart_move_router)
     app.include_router(sonarr_sync_router)
     app.include_router(watch_sync_router)
     app.include_router(watchlist_library_router)

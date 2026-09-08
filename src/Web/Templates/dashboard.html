@@ -140,7 +140,7 @@
                 {% else %}•{% endif %}
             </span>
             <span class="activity-label">{{ item.label or '(unknown)' }}</span>
-            <span class="activity-ts">{{ item.ts[:16] if item.ts else '' }}</span>
+            <span class="activity-ts">{{ (item.ts | localtime)[:16] if item.ts else '' }}</span>
         </div>
         {% endfor %}
     </div>

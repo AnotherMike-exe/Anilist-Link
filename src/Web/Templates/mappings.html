@@ -41,7 +41,7 @@
                     <a href="https://anilist.co/anime/{{ ov.anilist_id }}" target="_blank" rel="noopener"
                        style="color:var(--accent)">{{ ov.anilist_id }}</a>
                 </td>
-                <td class="text-muted" style="font-size:0.85rem">{{ ov.created_at[:10] if ov.created_at else "—" }}</td>
+                <td class="text-muted" style="font-size:0.85rem">{{ ov.created_at | localdate if ov.created_at else "—" }}</td>
                 <td>
                     <form method="post" action="/mappings/{{ ov.id }}/delete" style="display:inline"
                           onsubmit="return confirm('Delete this override?')">

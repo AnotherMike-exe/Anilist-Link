@@ -146,6 +146,51 @@ def _delete_support_files(directory: str) -> int:
     return deleted
 
 
+def _dir_has_media(directory: str) -> bool:
+    """Return True if *directory* (recursively) holds any video/subtitle file."""
+    for _root, _dirs, _files in os.walk(directory):
+        if any(os.path.splitext(f)[1].lower() in _MEDIA_EXTS for f in _files):
+            return True
+    return False
+
+
+def prune_orphaned_dir(directory: str, protected: "list[str] | None" = None) -> bool:
+    """Remove *directory* if it no longer holds any media (video/subtitle) files.
+
+    Deletes leftover support files (nfo/artwork) first, then removes the now
+    media-free tree.  This is the shared cleanup used after a file is moved out
+    of its old location so media servers don't index orphaned folders full of
+    stale posters/nfos.
+
+    ``protected`` paths (and any directory that is an ANCESTOR of one) are never
+    removed — pass the new target directory, its parents, and the library/root
+    folders so the move destination and roots stay safe.  Returns True if the
+    directory was removed.
+    """
+    if not directory or not os.path.isdir(directory):
+        return False
+
+    real = os.path.realpath(directory)
+    protected_reals = {os.path.realpath(p) for p in (protected or []) if p}
+    for p in protected_reals:
+        # Skip if this dir IS a protected path or an ancestor of one (deleting
+        # it would take the move target / a root down with it).
+        if real == p or p.startswith(real + os.sep):
+            return False
+
+    if _dir_has_media(real):
+        return False
+
+    _delete_support_files(real)
+    try:
+        shutil.rmtree(real)
+        logger.info("Pruned orphaned source folder: %s", real)
+        return True
+    except OSError as exc:
+        logger.warning("Could not prune orphaned folder %s: %s", real, exc)
+        return False
+
+
 def _xml_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -910,6 +955,7 @@ class LibraryRestructurer:
         output_dir: str | None = None,
         movie_output_dir: str | None = None,
         tv_output_dir: str | None = None,
+        force_franchise_root: bool = False,
     ) -> RestructurePlan:
         """Analyze shows and build a restructure plan.
 
@@ -923,6 +969,11 @@ class LibraryRestructurer:
                 entries go here instead of output_dir.
             tv_output_dir: When movie/TV split is enabled, all non-MOVIE
                 entries go here instead of output_dir.
+            force_franchise_root: When True, a standalone entry with no distinct
+                group root still has its PREQUEL chain walked to find a franchise
+                base to nest under — regardless of format.  Used by the
+                single-item Smart Move (cost is negligible for one entry) so a
+                movie with a missing/wrong cached format still nests.
         """
         progress.status = "analyzing"
         progress.phase = "Analyzing shows"
@@ -935,6 +986,7 @@ class LibraryRestructurer:
         # _resolve_output_dir.
         self._movie_output_dir = movie_output_dir
         self._tv_output_dir = tv_output_dir
+        self._force_franchise_root = force_franchise_root
 
         plan = RestructurePlan(groups=[], operation_level=level)
 
@@ -994,6 +1046,83 @@ class LibraryRestructurer:
                         }
                     )
         return conflicts
+
+    async def _render_group_root_folder(self, group_id: int) -> str:
+        """Render the franchise ROOT folder name for a series group.
+
+        Mirrors the multi-entry group naming so a lone franchise entry
+        (e.g. a movie whose TV seasons live elsewhere) can nest under the
+        same root folder as its siblings (Structure A).  Returns "" when the
+        group can't be resolved.
+        """
+        group_info = await self._db.fetch_one(
+            "SELECT display_title, root_anilist_id FROM series_groups WHERE id=?",
+            (group_id,),
+        )
+        if not group_info:
+            return ""
+        display_title = group_info.get("display_title") or ""
+        root_anilist_id = group_info.get("root_anilist_id") or 0
+        root_cache = (
+            await self._db.get_cached_metadata(root_anilist_id)
+            if root_anilist_id
+            else None
+        )
+        safe_display = self._san(display_title)
+        tokens: dict[str, str] = {
+            "title": safe_display,
+            "title.romaji": safe_display,
+            "title.english": safe_display,
+            "year": "",
+            "format": "",
+            "format.short": "",
+        }
+        if root_cache:
+            romaji = root_cache.get("title_romaji", "")
+            english = root_cache.get("title_english", "")
+            if romaji:
+                tokens["title.romaji"] = self._san(romaji)
+            if english:
+                tokens["title.english"] = self._san(english)
+            if self._title_pref == "english" and english:
+                tokens["title"] = self._san(english)
+            elif romaji:
+                tokens["title"] = self._san(romaji)
+            year = root_cache.get("year", 0) or 0
+            if year:
+                tokens["year"] = str(year)
+        rendered = self._san(self._folder_tmpl.render(tokens))
+        if not rendered:
+            rendered = re.sub(r'[<>:"/\\|?*]', "", display_title).strip()
+        return rendered
+
+    async def _render_root_folder_by_id(self, root_id: int) -> str:
+        """Render a franchise root folder name from an entry's cached metadata.
+
+        Used when nesting via the PREQUEL chain (no series-group row to read a
+        display title from).  Returns "" when the entry isn't cached.
+        """
+        cache = await self._db.get_cached_metadata(root_id)
+        if not cache:
+            return ""
+        romaji = cache.get("title_romaji") or ""
+        english = cache.get("title_english") or ""
+        if self._title_pref == "english" and english:
+            title = english
+        else:
+            title = romaji or english
+        if not title:
+            return ""
+        year = cache.get("year") or 0
+        tokens: dict[str, str] = {
+            "title": self._san(title),
+            "title.romaji": self._san(romaji or title),
+            "title.english": self._san(english or title),
+            "year": str(year) if year else "",
+            "format": "",
+            "format.short": "",
+        }
+        return self._san(self._folder_tmpl.render(tokens))
 
     async def _analyze_full_restructure(
         self,
@@ -1471,6 +1600,67 @@ class LibraryRestructurer:
             parent_dir = self._resolve_output_dir(
                 output_dir, si.anilist_format, si.local_path
             )
+
+            # Nest a lone franchise entry (e.g. a movie whose TV seasons live
+            # elsewhere / aren't in this scan) under the series-group ROOT
+            # folder so it sits beside its siblings (Structure A) instead of in
+            # a separate top-level directory.
+            _root_id = 0
+            _grp_id = standalone_group_id.get(si.anilist_id)
+            if _grp_id:
+                _root_row = await self._db.fetch_one(
+                    "SELECT root_anilist_id FROM series_groups WHERE id=?",
+                    (_grp_id,),
+                )
+                _root_id = int((_root_row or {}).get("root_anilist_id") or 0)
+
+            # When the group is missing or self-rooted (a stale single-entry
+            # group can't reach the base), trace the PREQUEL chain to the
+            # franchise root.  Gated to movies during a full-library analysis to
+            # keep it cheap, but forced for the single-item Smart Move.
+            _force = getattr(self, "_force_franchise_root", False)
+            _is_movie = (si.anilist_format or "").upper() == "MOVIE"
+            if (
+                (not _root_id or _root_id == si.anilist_id)
+                and si.anilist_id
+                and (_force or _is_movie)
+            ):
+                try:
+                    from src.Utils.NamingTranslator import resolve_franchise_root_id
+
+                    _walked = await resolve_franchise_root_id(
+                        si.anilist_id, self._group_builder._anilist
+                    )
+                    if _walked and _walked != si.anilist_id:
+                        try:
+                            await self._group_builder.get_or_build_group(_walked)
+                        except Exception:
+                            pass
+                        _root_id = _walked
+                except Exception as _exc:
+                    logger.debug("Prequel-root walk failed for %s: %s", si.title, _exc)
+
+            _root_folder = ""
+            if _root_id and _root_id != si.anilist_id:
+                if _grp_id:
+                    _root_folder = await self._render_group_root_folder(_grp_id)
+                if not _root_folder:
+                    _root_folder = await self._render_root_folder_by_id(_root_id)
+                if _root_folder and _root_folder != rendered_folder:
+                    parent_dir = os.path.join(parent_dir, _root_folder)
+
+            logger.info(
+                "Restructure nesting for %r (anilist_id=%s, format=%r):"
+                " group_id=%s group_root=%s resolved_root=%s -> root_folder=%r",
+                si.title,
+                si.anilist_id,
+                si.anilist_format,
+                _grp_id,
+                _root_id if _grp_id else None,
+                _root_id,
+                _root_folder or None,
+            )
+
             target_folder = os.path.join(parent_dir, rendered_folder)
 
             if not os.path.isdir(si.local_path):
@@ -1930,11 +2120,15 @@ class LibraryRestructurer:
                     )
                 )
 
-            # Skip if nothing changes (same folder name and all files unchanged).
-            # Use realpath comparison so symlinks and path normalisation
-            # don't cause false positives on already-structured content.
-            current_folder = os.path.basename(si.local_path)
-            folder_changed = current_folder != rendered_folder
+            # Skip if nothing changes (folder already at the target and all
+            # files unchanged).  Compare FULL paths, not just the basename, so a
+            # relocation into a new parent (e.g. nesting a movie under its
+            # franchise root) counts as a change even when the folder name is
+            # unchanged.  Realpath keeps symlinks/normalisation from causing
+            # false positives.
+            folder_changed = os.path.realpath(si.local_path) != os.path.realpath(
+                target_folder
+            )
             files_changed = any(
                 fm.original_filename != fm.renamed_filename
                 and os.path.realpath(fm.source) != os.path.realpath(fm.destination)
