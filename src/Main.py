@@ -9,6 +9,7 @@ import uvicorn
 from dotenv import load_dotenv
 
 from src.Clients.AnilistClient import AniListClient
+from src.Clients.AnilistHealth import AniListHealth
 from src.Clients.CrunchyrollClient import CrunchyrollClient
 from src.Clients.PlexClient import PlexClient
 from src.Database.Connection import DatabaseManager
@@ -32,6 +33,27 @@ from src.Web.App import create_app
 from src.Web.Routes.Helpers import create_group_builder, create_title_matcher
 
 logger = get_logger(__name__)
+
+
+def anilist_available(anilist_client: AniListClient, job_name: str) -> bool:
+    """False (with a log line) while the AniList API is known to be offline.
+
+    Scheduled jobs check this before doing any work so an outage doesn't
+    turn every interval into a burst of doomed requests. The health monitor
+    owns recovery detection, so jobs simply resume on their next tick once
+    the API answers again.
+    """
+    health = anilist_client.health
+    if not health.is_down:
+        return True
+    logger.warning(
+        "%s skipped — AniList API unavailable (%s); down for %ds, next check in %ds",
+        job_name,
+        health.reason,
+        int(health.down_seconds),
+        int(health.seconds_until_probe()),
+    )
+    return False
 
 
 async def crunchyroll_sync_task(
@@ -305,11 +327,14 @@ async def main() -> None:
     db_settings = await db.get_all_settings()
     config = load_config_from_db_settings(db_settings)
 
-    # Create AniList client
+    # Create AniList client. The health tracker is created here so the
+    # whole process shares one view of API availability.
+    anilist_health = AniListHealth()
     anilist_client = AniListClient(
         client_id=config.anilist.client_id,
         client_secret=config.anilist.client_secret,
         redirect_uri=config.anilist.redirect_uri,
+        health=anilist_health,
     )
 
     # Create scheduler
@@ -321,6 +346,8 @@ async def main() -> None:
     # so settings page changes take effect without restart
     async def _cr_sync() -> None:
         cfg = app.state.config
+        if not anilist_available(app.state.anilist_client, "Crunchyroll sync"):
+            return
         if not cfg.crunchyroll.auto_sync_enabled:
             logger.debug("Crunchyroll auto-sync is disabled — skipping scheduled run")
             return
@@ -332,17 +359,25 @@ async def main() -> None:
             await crunchyroll_preview_task(cfg, db, app.state.anilist_client)
 
     async def _plex_scan() -> None:
+        if not anilist_available(app.state.anilist_client, "Plex metadata scan"):
+            return
         await plex_metadata_scan_task(app.state.config, db, app.state.anilist_client)
 
     async def _download_sync() -> None:
+        if not anilist_available(app.state.anilist_client, "Download auto-sync"):
+            return
         await download_sync_task(app.state.config, db, app.state.anilist_client)
 
     async def _library_reindex() -> None:
+        if not anilist_available(app.state.anilist_client, "Library re-index"):
+            return
         await library_reindex_task(db, app.state.anilist_client)
 
     async def _jellyfin_watch_sync() -> None:
         cfg = app.state.config
         if not cfg.jellyfin.url or not cfg.jellyfin.api_key:
+            return
+        if not anilist_available(app.state.anilist_client, "Jellyfin watch sync"):
             return
         if not cfg.jellyfin.watch_sync_enabled:
             logger.debug("Jellyfin watch sync is disabled — skipping scheduled run")
@@ -367,6 +402,8 @@ async def main() -> None:
     async def _plex_watch_sync() -> None:
         cfg = app.state.config
         if not cfg.plex.url or not cfg.plex.token:
+            return
+        if not anilist_available(app.state.anilist_client, "Plex watch sync"):
             return
         if not cfg.plex.watch_sync_enabled:
             logger.debug("Plex watch sync is disabled — skipping scheduled run")
@@ -438,6 +475,9 @@ async def main() -> None:
                 logger.debug("Virtual season cleanup error", exc_info=True)
             finally:
                 await jf.close()
+            return
+
+        if not anilist_available(app.state.anilist_client, "Jellyfin auto-scan"):
             return
 
         # Acquire lock so concurrent events don't stack up full scans.

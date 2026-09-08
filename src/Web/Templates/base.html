@@ -25,6 +25,16 @@
         </div>
     </nav>
 
+    <!-- AniList API status banner (outage / reduced rate limit) -->
+    <div id="anilist-status-bar" class="api-status-bar hidden">
+        <span class="api-status-dot"></span>
+        <div class="api-status-text">
+            <span class="api-status-headline" id="anilist-status-headline"></span>
+            <span class="api-status-detail" id="anilist-status-detail"></span>
+        </div>
+        <button type="button" class="api-status-btn hidden" id="anilist-status-check">Check now</button>
+    </div>
+
     <!-- Persistent notification bar -->
     <div id="notification-bar" class="notification-bar"></div>
 
@@ -222,6 +232,90 @@
 
         poll();
         setInterval(poll, 2000);
+    })();
+
+    // --- AniList API status banner ---
+    // Shows an always-visible bar while the AniList API is down (all syncs,
+    // scans and downloads are halted) or running with a reduced rate limit.
+    // Polled every 15s; the elapsed/next-check counters tick locally in
+    // between so the downtime figure stays live without extra requests.
+    (function () {
+        const bar = document.getElementById('anilist-status-bar');
+        const headlineEl = document.getElementById('anilist-status-headline');
+        const detailEl = document.getElementById('anilist-status-detail');
+        const checkBtn = document.getElementById('anilist-status-check');
+        const POLL_MS = 15000;
+
+        let snapshot = null;      // last payload from the server
+        let syncedAt = 0;         // Date.now() when it arrived
+
+        function fmtDuration(seconds) {
+            const total = Math.max(0, Math.round(seconds));
+            if (total < 60) return total + 's';
+            const m = Math.floor(total / 60), s = total % 60;
+            if (m < 60) return m + 'm ' + s + 's';
+            const h = Math.floor(m / 60), rm = m % 60;
+            if (h < 24) return h + 'h ' + rm + 'm';
+            return Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
+        }
+
+        function render() {
+            if (!snapshot || snapshot.state === 'ok') {
+                bar.classList.add('hidden');
+                return;
+            }
+            const elapsed = (Date.now() - syncedAt) / 1000;
+            const isDown = snapshot.state === 'down';
+
+            bar.classList.remove('hidden');
+            bar.classList.toggle('is-degraded', !isDown);
+            checkBtn.classList.toggle('hidden', !isDown);
+            headlineEl.textContent = snapshot.headline || '';
+
+            if (isDown) {
+                const downFor = fmtDuration((snapshot.down_seconds || 0) + elapsed);
+                const nextIn = Math.max(0, (snapshot.next_probe_in || 0) - elapsed);
+                const parts = [];
+                if (snapshot.reason) parts.push(snapshot.reason);
+                parts.push('Down for ' + downFor);
+                parts.push(nextIn > 0
+                    ? 'next check in ' + fmtDuration(nextIn)
+                    : 'checking now…');
+                detailEl.textContent = parts.join(' · ');
+            } else {
+                detailEl.textContent = snapshot.detail_text || '';
+            }
+        }
+
+        async function poll() {
+            try {
+                const resp = await fetch('/api/anilist/status');
+                if (!resp.ok) return;
+                snapshot = await resp.json();
+                syncedAt = Date.now();
+                render();
+            } catch (e) { /* transient — keep showing the last known state */ }
+        }
+
+        checkBtn.addEventListener('click', async function () {
+            checkBtn.disabled = true;
+            checkBtn.textContent = 'Checking…';
+            try {
+                const resp = await fetch('/api/anilist/check-now', { method: 'POST' });
+                if (resp.ok) {
+                    snapshot = await resp.json();
+                    syncedAt = Date.now();
+                    render();
+                    if (window._refreshNotifications) window._refreshNotifications();
+                }
+            } catch (e) { /* ignore — next poll will resync */ }
+            checkBtn.disabled = false;
+            checkBtn.textContent = 'Check now';
+        });
+
+        poll();
+        setInterval(poll, POLL_MS);
+        setInterval(render, 1000);
     })();
 
     // --- Persistent notifications (DB-backed, survives page reloads) ---

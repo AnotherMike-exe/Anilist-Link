@@ -470,6 +470,20 @@ class JellyfinMetadataScanner:
             len(shows),
         )
         for show in shows:
+            # Same halt as the Plex scanner: without AniList there is
+            # nothing to match against, so stop rather than mark every
+            # remaining item as unmatched.
+            if self._anilist.health.is_down:
+                logger.warning(
+                    "Jellyfin scan halted — AniList API unavailable (%s)",
+                    self._anilist.health.reason,
+                )
+                results.errors.append(
+                    "Scan halted — AniList API is unavailable. "
+                    "It will resume once AniList is back online."
+                )
+                return
+
             folder_name = _derive_folder_name(show)
             # Skip any item without a real filesystem path — these are virtual
             # Jellyfin containers (e.g. "Season Unknown", auto-generated season

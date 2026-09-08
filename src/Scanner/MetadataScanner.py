@@ -247,6 +247,20 @@ class MetadataScanner:
         logger.info("Scanning library: %s (%d shows)", library_title, len(shows))
 
         for show in shows:
+            # Stop the whole scan the moment AniList goes offline — every
+            # remaining show would only produce an unmatched result and a
+            # misleading "0 matched" report.
+            if self._anilist.health.is_down:
+                logger.warning(
+                    "Plex scan halted — AniList API unavailable (%s)",
+                    self._anilist.health.reason,
+                )
+                results.errors.append(
+                    "Scan halted — AniList API is unavailable. "
+                    "It will resume once AniList is back online."
+                )
+                return
+
             folder_name = getattr(show, "folder_name", "") or ""
             # The bulk /all endpoint omits Location data.  Always fetch
             # the real filesystem path so we can show it in the UI and

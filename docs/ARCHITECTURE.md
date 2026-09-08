@@ -67,8 +67,50 @@ GraphQL client handling all AniList interactions:
 - **OAuth2 flow**: authorization URL generation, token exchange, viewer profile fetch (also caches `Viewer.mediaListOptions.scoreFormat` at link time, self-healing refresh every 24h via `WatchlistRefresh`)
 - **Rate limiting**: token-bucket algorithm (90 capacity, 1.5/sec refill rate) — see `RateLimiter` class
 - **Retry logic**: exponential backoff on 429 and 5xx responses
+- **Availability circuit breaker**: see 3.1.1
 
 Used by: All 4 pillars
+
+#### 3.1.1. API Availability Handling (`src/Clients/AnilistHealth.py`, `src/Sync/AnilistHealthMonitor.py`)
+
+**Status**: Fully implemented
+
+AniList periodically switches its public API off entirely (HTTP 403 — *"The
+AniList API has been temporarily disabled due to severe stability issues."*)
+or leaves it up with a reduced rate limit (30 req/min instead of 90). Without
+a shared view of that, every scan, sync and refresh in the container
+rediscovered the outage on its own, three retries at a time.
+
+`AniListHealth` is a single tracker shared by the whole process (created in
+`Main.py`, injected into `AniListClient`). It stores only facts — last
+success, last failure, the server's advertised rate limit — and derives one
+of three states:
+
+| State | Meaning | Effect |
+|-------|---------|--------|
+| `ok` | Normal operation | — |
+| `degraded` | Reduced rate-limit ceiling, or recent 429s | Warning banner; work continues (slower) |
+| `down` | API disabled, unreachable, persistent 5xx, or sustained 429s | Circuit open — all AniList calls fail fast |
+
+**Fail fast, then probe.** While `down`, `_execute_query()` raises
+`AniListUnavailableError` *before* issuing a request. Recovery is detected by
+`AniListClient.probe()` — a single cheap `Media(id: 1)` query issued by the
+health monitor on a backoff schedule (30s → 1m → 2m → 5m → 10m → 15m), never
+by whichever job happens to run next. A 429 on a probe counts as "alive".
+
+**Halting work.** Scheduled jobs check `anilist_available()` (`Main.py`) and
+skip; the Plex/Jellyfin scanners, `WatchSyncer` and `DownloadSyncer` break out
+of their per-item loops rather than marking every remaining item unmatched;
+the watchlist refresh and the synonyms backfill stop early.
+
+**Surfacing it.** `GET /api/anilist/status` feeds an always-visible banner in
+`base.html` (polled every 15s, counters tick locally in between) showing the
+reason, total downtime, and the countdown to the next check, with a **Check
+now** button (`POST /api/anilist/check-now`). Outage state is persisted to
+`app_settings` under `anilist.health`, so a container restart reports the true
+downtime instead of resetting to zero. Recovery posts a dismissible dashboard
+notification. Any route handler that touches a down API returns `503` via an
+app-level exception handler rather than a bare `500`.
 
 ### 3.2. Title Matcher (`src/Matching/TitleMatcher.py`, `src/Matching/Normalizer.py`)
 
@@ -131,6 +173,7 @@ FastAPI application with Jinja2 templates:
 - **Onboarding** (`/onboarding`): 4-step setup wizard for new users
 - **Connection Tests** (`/api/test/*`): Live connection validation for all services
 - **Floating progress widget**: In `base.html`, polls `GET /api/progress` every 2s for background task feedback
+- **AniList status banner**: In `base.html`, polls `GET /api/anilist/status` every 15s; shows an outage/reduced-rate-limit bar with live downtime, next-check countdown, and a **Check now** action. See 3.1.1
 - **Rate Your Completed Shows**: Dashboard card listing AniList `COMPLETED` entries with `score == 0`; rating submits via `SaveMediaListEntry(score)` and updates locally. Toggle: `app.show_unrated_completed` (Settings + Onboarding, default on). Shared rating control (`rating-widget.js`) adapts to the account's `scoreFormat`.
 - **Glance integration** (`/glance/rate-completed`): Standalone, iframe-sized page exposing the same unrated-completed list + rating action for embedding in a [Glance](https://github.com/glanceapp/glance) dashboard. Gated by a shared API key (`glance.api_key`) generated from Settings — the only credentialed endpoint in an otherwise local-network-trust app.
 
@@ -144,6 +187,7 @@ APScheduler integration for periodic background tasks. `JobScheduler` class wrap
 - Job status query via `get_job_status()`
 - Registered jobs: Crunchyroll watch sync, Plex/Jellyfin metadata scan, watch sync, download sync, watchlist refresh
 - `watchlist_refresh` (`src/Sync/WatchlistRefresh.py`): refreshes `user_watchlist` for all linked AniList accounts; runs every 30 min (configurable via `WATCHLIST_REFRESH_INTERVAL`), fires on startup, and is triggered automatically after Crunchyroll sync completes or preview changes are applied
+- `anilist_health_monitor` (`src/Sync/AnilistHealthMonitor.py`): asyncio loop started in the app lifespan (not APScheduler). Idle while AniList is healthy; probes for recovery on a backoff schedule during an outage and persists state transitions. See 3.1.1
 
 ### 3.8. Config (`src/Utils/Config.py`)
 

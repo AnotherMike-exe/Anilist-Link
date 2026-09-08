@@ -9,12 +9,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from src.Clients.AnilistClient import AniListClient
+from src.Clients.AnilistHealth import AniListUnavailableError
 from src.Database.Connection import DatabaseManager
 from src.Scheduler.Jobs import JobScheduler
+from src.Sync.AnilistHealthMonitor import anilist_health_monitor
 from src.Sync.CacheSynonymsBackfill import backfill_cache_synonyms
 from src.Sync.WatchlistRefresh import watchlist_activity_loop
 from src.Utils.Config import AppConfig
@@ -75,6 +78,15 @@ def create_app(
         # Auto-register arr webhooks (fire-and-forget, non-blocking)
         asyncio.create_task(_register_arr_webhooks(config))
 
+        # AniList availability monitor: restores any outage recorded before
+        # a restart, probes for recovery on a backoff schedule, and keeps
+        # the persisted state in sync. Idle while AniList is healthy.
+        health_task = asyncio.create_task(
+            anilist_health_monitor(db, anilist_client),
+            name="anilist-health-monitor",
+        )
+        app.state.anilist_health_task = health_task
+
         # One-shot backfill for anilist_cache.synonyms — runs in the
         # background after the schema-v3 migration so existing cached rows
         # eventually get synonyms populated without requiring users to
@@ -102,6 +114,8 @@ def create_app(
         # Shutdown
         if not loop_task.done():
             loop_task.cancel()
+        if not health_task.done():
+            health_task.cancel()
         jf_listener = getattr(app.state, "jellyfin_listener", None)
         if jf_listener:
             logger.info("Stopping Jellyfin WebSocket listener")
@@ -152,8 +166,26 @@ def create_app(
     _BACKGROUND_POLL_PATHS = {
         "/api/progress",
         "/api/notifications",
+        "/api/anilist/status",
         "/health",
     }
+
+    # Any handler that reaches AniList while it is down gets a fail-fast
+    # AniListUnavailableError instead of a hung retry loop. Translate it into
+    # a 503 so the UI shows the outage reason rather than a bare 500.
+    @app.exception_handler(AniListUnavailableError)
+    async def _anilist_unavailable_handler(  # type: ignore[no-untyped-def]
+        request: Request, exc: AniListUnavailableError
+    ):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "error": "AniList API is unavailable — this action is paused.",
+                "reason": exc.reason,
+                "down_seconds": round(exc.down_seconds),
+            },
+        )
 
     @app.middleware("http")
     async def _track_activity(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -167,6 +199,7 @@ def create_app(
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     # Register routers
+    from src.Web.Routes.AnilistStatus import router as anilist_status_router
     from src.Web.Routes.ArrWebhook import router as arr_webhook_router
     from src.Web.Routes.Auth import router as auth_router
     from src.Web.Routes.ConnectionTest import router as connection_test_router
@@ -193,6 +226,7 @@ def create_app(
     from src.Web.Routes.WatchlistLibrary import router as watchlist_library_router
     from src.Web.Routes.WatchSync import router as watch_sync_router
 
+    app.include_router(anilist_status_router)
     app.include_router(arr_webhook_router)
     app.include_router(downloads_router)
     app.include_router(auth_router)

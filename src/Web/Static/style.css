@@ -1435,6 +1435,7 @@ select:disabled {
 .notif-info    { border-left: 3px solid var(--accent); }
 .notif-success { border-left: 3px solid #4caf50; }
 .notif-warning { border-left: 3px solid #ff9800; }
+.notif-error   { border-left: 3px solid var(--danger); }
 
 .notif-message {
     flex: 1;
@@ -1464,6 +1465,73 @@ select:disabled {
 }
 
 .notif-dismiss:hover { color: var(--text); }
+
+/* ============================================================
+   AniList API Status Banner
+   ============================================================ */
+
+.api-status-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 2rem;
+    font-size: 0.9rem;
+    border-bottom: 1px solid var(--border);
+    background: rgba(232, 93, 117, 0.12);
+    border-left: 4px solid var(--danger);
+}
+
+.api-status-bar.is-degraded {
+    background: rgba(255, 152, 0, 0.12);
+    border-left-color: #ff9800;
+}
+
+.api-status-dot {
+    flex: none;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--danger);
+    animation: apiStatusPulse 1.8s ease-in-out infinite;
+}
+
+.api-status-bar.is-degraded .api-status-dot { background: #ff9800; }
+
+@keyframes apiStatusPulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.25; }
+}
+
+.api-status-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+
+.api-status-headline { color: var(--text); font-weight: 600; }
+.api-status-detail   { color: var(--text-muted); font-size: 0.84rem; }
+
+.api-status-btn {
+    flex: none;
+    padding: 0.3rem 0.75rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.82rem;
+    cursor: pointer;
+}
+
+.api-status-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.api-status-btn:disabled { opacity: 0.6; cursor: default; }
+
+@media (max-width: 640px) {
+    .api-status-bar { padding: 0.6rem 1rem; }
+}
 
 /* ============================================================
    Processing Overlay
