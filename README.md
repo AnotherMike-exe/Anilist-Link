@@ -136,7 +136,7 @@ The key is required — `/glance/rate-completed` is the one endpoint in this app
 - **AniList OAuth2** — Register your app at [anilist.co/settings/developer](https://anilist.co/settings/developer) to obtain `ANILIST_CLIENT_ID` and `ANILIST_CLIENT_SECRET`.
 - **Logs** — View with `docker logs AnilistLink` or tail the file at `/config/logs/anilist_link.log` inside the container.
 - **Permissions** — `PUID`/`PGID` must match the owner of your media files on the host, otherwise renames will fail with permission errors.
-- **AniList downtime** — When AniList takes its API offline, a banner appears at the top of the dashboard and background work pauses. Anilist-Link re-checks on its own (30s, backing off to every 15 min); **Check now** forces an immediate re-check. Nothing needs restarting — jobs resume on their next scheduled run.
+- **AniList downtime** — When AniList takes its API offline, a banner appears at the top of the dashboard and background work pauses. Anilist-Link re-checks on its own once an hour (and once on startup); **Check now** in the banner forces an immediate re-check. Nothing needs restarting — jobs resume on their next scheduled run.
 
 ---
 

@@ -129,6 +129,32 @@ class TestMonitorLoop:
 
         client.probe.assert_not_awaited()
 
+    async def test_restored_outage_is_probed_before_the_first_sleep(self) -> None:
+        # A restart makes a probe due immediately; the monitor must not sit
+        # out a full tick (an hour of downtime is already on the clock).
+        db = FakeDB(
+            {
+                HEALTH_SETTING_KEY: json.dumps(
+                    {"down_since": 1000.0, "reason": "API disabled"}
+                )
+            }
+        )
+        client = AsyncMock()
+        client.health = AniListHealth()
+        client.probe = AsyncMock(return_value=False)
+
+        task = asyncio.create_task(
+            anilist_health_monitor(db, client, tick_seconds=3600)
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        client.probe.assert_awaited_once()
+
     async def test_recovery_posts_notification_and_persists(self) -> None:
         health = AniListHealth()
         health.record_outage("API disabled")

@@ -753,7 +753,7 @@ class AniListClient:
         """Send one cheap query to check whether AniList is answering again.
 
         Deliberately bypasses the retry loop in :meth:`_execute_query`: a
-        probe is a single request, and the backoff between probes is owned
+        probe is a single request, and the interval between probes is owned
         by :class:`~src.Clients.AnilistHealth.AniListHealth`. Returns True
         when the API responded, which also clears any recorded outage.
         """

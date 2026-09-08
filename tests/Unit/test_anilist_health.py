@@ -8,7 +8,7 @@ import pytest
 from src.Clients.AnilistClient import AniListClient
 from src.Clients.AnilistHealth import (
     NORMAL_RATE_LIMIT,
-    PROBE_BACKOFF_SECONDS,
+    PROBE_INTERVAL_SECONDS,
     STATE_DEGRADED,
     STATE_DOWN,
     STATE_OK,
@@ -84,29 +84,27 @@ class TestHealthState:
         h.record_outage("API disabled")
         assert h._down_since == first
 
-    def test_concurrent_failures_do_not_fast_forward_backoff(self) -> None:
+    def test_first_probe_is_an_hour_out(self) -> None:
+        h = AniListHealth()
+        h.record_outage("API disabled")
+        assert 3500 < h.seconds_until_probe() <= PROBE_INTERVAL_SECONDS
+
+    def test_concurrent_failures_do_not_move_the_probe(self) -> None:
         # Requests already in flight when the outage began all report it.
-        # That is one outage, not five — the first probe must still be due
-        # at the shortest interval.
-        h = AniListHealth()
-        for _ in range(5):
-            h.record_outage("API disabled")
-        assert h.seconds_until_probe() <= PROBE_BACKOFF_SECONDS[0]
-
-    def test_failure_after_probe_window_lengthens_interval(self) -> None:
+        # That is one outage, not five — the schedule must not shift.
         h = AniListHealth()
         h.record_outage("API disabled")
-        first_wait = h.seconds_until_probe()
-        h._next_probe_at = 0.0  # the probe window has elapsed
-        h.record_outage("API disabled")
-        assert h.seconds_until_probe() > first_wait
-
-    def test_probe_backoff_caps_at_longest_interval(self) -> None:
-        h = AniListHealth()
-        for _ in range(len(PROBE_BACKOFF_SECONDS) + 5):
-            h._next_probe_at = 0.0
+        scheduled = h._next_probe_at
+        for _ in range(4):
             h.record_outage("API disabled")
-        assert h.seconds_until_probe() <= PROBE_BACKOFF_SECONDS[-1] + 1
+        assert h._next_probe_at == scheduled
+
+    def test_failed_probe_reschedules_a_full_interval_out(self) -> None:
+        h = AniListHealth()
+        h.record_outage("API disabled")
+        h._next_probe_at = 0.0  # the probe window has elapsed; the probe failed
+        h.record_outage("API disabled")
+        assert 3500 < h.seconds_until_probe() <= PROBE_INTERVAL_SECONDS
 
     def test_reduced_rate_limit_marks_degraded(self) -> None:
         h = AniListHealth()
@@ -189,10 +187,12 @@ class TestPersistence:
         h.restore(down_since=None)
         assert h.state == STATE_OK
 
-    def test_restore_restarts_probe_at_shortest_interval(self) -> None:
+    def test_restore_makes_a_probe_due_immediately(self) -> None:
+        # One request per container start beats carrying a stale outage
+        # for up to an hour.
         h = AniListHealth()
         h.restore(down_since=1.0, reason="API disabled")
-        assert h.seconds_until_probe() <= PROBE_BACKOFF_SECONDS[0]
+        assert h.is_probe_due()
 
     def test_snapshot_is_json_friendly(self) -> None:
         h = AniListHealth()

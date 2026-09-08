@@ -95,8 +95,12 @@ of three states:
 **Fail fast, then probe.** While `down`, `_execute_query()` raises
 `AniListUnavailableError` *before* issuing a request. Recovery is detected by
 `AniListClient.probe()` — a single cheap `Media(id: 1)` query issued by the
-health monitor on a backoff schedule (30s → 1m → 2m → 5m → 10m → 15m), never
-by whichever job happens to run next. A 429 on a probe counts as "alive".
+health monitor once an hour (`PROBE_INTERVAL_SECONDS`), never by whichever
+job happens to run next. A 429 on a probe counts as "alive". AniList outages
+run for hours, so checking more often buys nothing — anyone at the dashboard
+who wants an immediate answer uses the banner's **Check now** button. The one
+exception is a container restart, which makes a probe due immediately rather
+than carrying a possibly-stale outage for up to an hour.
 
 **Halting work.** Scheduled jobs check `anilist_available()` (`Main.py`) and
 skip; the Plex/Jellyfin scanners, `WatchSyncer` and `DownloadSyncer` break out
@@ -187,7 +191,7 @@ APScheduler integration for periodic background tasks. `JobScheduler` class wrap
 - Job status query via `get_job_status()`
 - Registered jobs: Crunchyroll watch sync, Plex/Jellyfin metadata scan, watch sync, download sync, watchlist refresh
 - `watchlist_refresh` (`src/Sync/WatchlistRefresh.py`): refreshes `user_watchlist` for all linked AniList accounts; runs every 30 min (configurable via `WATCHLIST_REFRESH_INTERVAL`), fires on startup, and is triggered automatically after Crunchyroll sync completes or preview changes are applied
-- `anilist_health_monitor` (`src/Sync/AnilistHealthMonitor.py`): asyncio loop started in the app lifespan (not APScheduler). Idle while AniList is healthy; probes for recovery on a backoff schedule during an outage and persists state transitions. See 3.1.1
+- `anilist_health_monitor` (`src/Sync/AnilistHealthMonitor.py`): asyncio loop started in the app lifespan (not APScheduler). Idle while AniList is healthy; probes for recovery hourly during an outage and persists state transitions. See 3.1.1
 
 ### 3.8. Config (`src/Utils/Config.py`)
 

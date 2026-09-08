@@ -12,7 +12,7 @@ This module records that state once, centrally, so that:
 
 * callers fail fast instead of retrying against a known-dead endpoint,
 * the dashboard can show how long the outage has lasted, and
-* recovery is detected by a single cheap probe on a backoff schedule
+* recovery is detected by a single cheap probe on a slow, fixed schedule
   rather than by whichever job happens to run next.
 
 The tracker holds only *facts* (last success, last failure, current server
@@ -35,9 +35,11 @@ STATE_DOWN = "down"
 #: server reports below this is treated as a deliberate reduction.
 NORMAL_RATE_LIMIT = 90
 
-#: How long a request is spaced out after each consecutive failed probe.
-#: Index 0 is used for the first probe after an outage starts.
-PROBE_BACKOFF_SECONDS = (30, 60, 120, 300, 600, 900)
+#: How long to wait between automatic recovery probes. AniList outages last
+#: hours, not seconds, so re-checking often buys nothing — and anyone sitting
+#: at the dashboard can force an immediate check with the banner's "Check now"
+#: button rather than waiting this out.
+PROBE_INTERVAL_SECONDS = 3600
 
 #: A 429 keeps the app in "degraded" for this long after the last one, so a
 #: burst of throttling is visible in the UI instead of flashing past.
@@ -100,7 +102,6 @@ class AniListHealth:
         self._reduced_limit: int | None = None
         self._consecutive_failures: int = 0
         self._outage_count: int = 0
-        self._probe_index: int = 0
         self._next_probe_at: float | None = None  # monotonic
         self._last_probe_at: float | None = None  # wall clock
         # Bumped on every change worth persisting / notifying about, so the
@@ -199,7 +200,6 @@ class AniListHealth:
             self._down_since = None
             self._reason = ""
             self._detail = ""
-            self._probe_index = 0
             self._next_probe_at = None
             self.version += 1
 
@@ -207,11 +207,9 @@ class AniListHealth:
         """Record that the API is unusable, opening the circuit.
 
         Repeated calls keep the original ``down_since`` so the UI shows
-        total downtime. The probe interval only lengthens when a failure
-        arrives *after* the scheduled probe time — otherwise a handful of
-        requests already in flight when the outage began would all report
-        it at once and fast-forward the backoff to its longest interval
-        before the first probe was ever sent.
+        total downtime, and never bring the next probe forward: requests
+        already in flight when the outage began all report it at once, and
+        a failed probe should not restart the clock early either.
         """
         now = time.time()
         now_mono = time.monotonic()
@@ -222,7 +220,6 @@ class AniListHealth:
         if first:
             self._down_since = now
             self._outage_count += 1
-            self._probe_index = 0
             logger.error(
                 "AniList API marked DOWN: %s%s",
                 reason,
@@ -237,17 +234,16 @@ class AniListHealth:
             if changed:
                 self.version += 1
             return
-        else:
-            self._probe_index = min(
-                self._probe_index + 1, len(PROBE_BACKOFF_SECONDS) - 1
-            )
 
         changed = first or reason != self._reason
         self._reason = reason
         self._detail = detail
-        wait = PROBE_BACKOFF_SECONDS[self._probe_index]
-        self._next_probe_at = now_mono + wait
-        logger.info("Next AniList recovery probe in %ds", wait)
+        self._next_probe_at = now_mono + PROBE_INTERVAL_SECONDS
+        logger.info(
+            "Next automatic AniList recovery check in %d min "
+            "(use 'Check now' on the dashboard to check sooner)",
+            PROBE_INTERVAL_SECONDS // 60,
+        )
         if changed:
             self.version += 1
 
@@ -299,15 +295,16 @@ class AniListHealth:
 
         A container restart should not reset "down for 3 hours" back to
         zero — the outage is a property of AniList, not of this process.
-        The probe schedule always restarts at the shortest interval so a
-        restart re-checks promptly.
+        The first probe is due immediately: a restart is a deliberate act
+        by the operator, and one request is worth not carrying a stale
+        outage for up to an hour. Subsequent probes use the normal
+        hourly cadence.
         """
         if down_since:
             self._down_since = float(down_since)
             self._reason = reason or "AniList API is unavailable"
             self._detail = detail
-            self._probe_index = 0
-            self._next_probe_at = time.monotonic() + PROBE_BACKOFF_SECONDS[0]
+            self._next_probe_at = time.monotonic()
             logger.warning(
                 "Restored AniList outage state from storage — down for %.0fs (%s)",
                 self.down_seconds,

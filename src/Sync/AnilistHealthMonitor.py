@@ -23,8 +23,9 @@ from src.Database.Connection import DatabaseManager
 logger = logging.getLogger(__name__)
 
 #: How often the monitor wakes to check whether a probe is due. The probe
-#: schedule itself lives in AniListHealth (30s → 15min backoff).
-MONITOR_TICK_SECONDS = 10
+#: cadence itself lives in AniListHealth (hourly); this only bounds how
+#: promptly a due probe fires and how quickly a state change is persisted.
+MONITOR_TICK_SECONDS = 60
 
 #: app_settings key holding the persisted outage snapshot.
 HEALTH_SETTING_KEY = "anilist.health"
@@ -90,12 +91,9 @@ async def anilist_health_monitor(
     previous_state = health.state
     last_version = health.version
 
+    # Check before the first sleep: a restored outage schedules its probe
+    # immediately, and waiting out a tick would delay it for no reason.
     while True:
-        try:
-            await asyncio.sleep(tick_seconds)
-        except asyncio.CancelledError:
-            return
-
         try:
             if health.is_probe_due():
                 await anilist_client.probe()
@@ -109,6 +107,11 @@ async def anilist_health_monitor(
             return
         except Exception:
             logger.exception("AniList health monitor iteration failed")
+
+        try:
+            await asyncio.sleep(tick_seconds)
+        except asyncio.CancelledError:
+            return
 
 
 async def _announce_transition(

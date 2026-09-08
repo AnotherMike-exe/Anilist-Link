@@ -201,7 +201,7 @@ Move to `/docs` when:
 ### Primary Models/Components
 - **AniList Client**: GraphQL client with OAuth2 flow, rate limiting (90 req/min), public queries, and authenticated mutations [implemented]
 - **AniList Health / Circuit Breaker**: Shared availability tracker (`src/Clients/AnilistHealth.py`) — detects AniList's "API temporarily disabled" 403s, reduced rate limits, sustained 429s and persistent 5xx; fails calls fast while down, halts scheduled jobs and per-item scan/sync loops, and drives the dashboard status banner [implemented]
-- **AniList Health Monitor**: Background loop (`src/Sync/AnilistHealthMonitor.py`) that probes for recovery on a 30s→15min backoff, persists outage state to `app_settings` so downtime survives restarts, and posts a recovery notification [implemented]
+- **AniList Health Monitor**: Background loop (`src/Sync/AnilistHealthMonitor.py`) that probes for recovery once an hour (immediately on restart), persists outage state to `app_settings` so downtime survives restarts, and posts a recovery notification [implemented]
 - **Plex Client**: Library enumeration, metadata writing, per-user watch tracking via Plex.tv API [implemented]
 - **Jellyfin Client**: Library access, metadata writing, watch status tracking via open API [implemented]
 - **Crunchyroll Client**: Reverse-engineered auth + watch history retrieval with session persistence [implemented]
@@ -417,7 +417,7 @@ Current tables (29):
   - `GET /api/status` - System status and sync statistics
   - `GET /api/progress` - Background task progress (floating widget)
   - `GET /api/anilist/status` - AniList API availability for the status banner (state, reason, downtime, next probe)
-  - `POST /api/anilist/check-now` - Probe AniList immediately instead of waiting for the backoff timer
+  - `POST /api/anilist/check-now` - Probe AniList immediately instead of waiting for the hourly timer
   - `GET /api/fs/browse` - File system browser for restructure/onboarding
   - `GET /settings` - GUI configuration page
   - `GET /onboarding` - First-run setup wizard
