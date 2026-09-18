@@ -468,6 +468,27 @@
 
   <div id="unmapped-result" class="alert" style="display:none;margin-bottom:1rem"></div>
 
+  {# ── Repair scan: writes that landed on the wrong entry ──────────────── #}
+  <div class="card" style="padding:1.25rem 1.5rem;margin-bottom:1.5rem">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+      <div style="max-width:60ch">
+        <h3 style="margin:0 0 0.4rem;font-size:1rem">Check for mis-mapped writes</h3>
+        <p class="text-muted" style="margin:0;font-size:0.88rem">
+          Before seasons were modelled as cours, a Crunchyroll season with no slot
+          was folded onto the franchise&rsquo;s season 1 entry and the raw episode
+          number written there. This compares your latest preview run against the
+          sync history and flags writes that hit the wrong entry of the same series
+          group. Revert one with <strong>Undo</strong> on the History tab.
+        </p>
+      </div>
+      <button class="btn btn-secondary btn-sm" id="repair-scan-btn"
+              onclick="runRepairScan()" style="white-space:nowrap">
+        Run repair scan
+      </button>
+    </div>
+    <div id="repair-scan-result" style="margin-top:1rem;display:none"></div>
+  </div>
+
   {% if not unmapped %}
   <div class="card" style="text-align:center;padding:3rem 1.5rem">
     <p style="margin-bottom:0.35rem">Nothing unmapped.</p>
@@ -1345,6 +1366,56 @@ function esc(str) {
   d.textContent = str;
   return d.innerHTML;
 }
+
+window.runRepairScan = function () {
+  var btn = document.getElementById('repair-scan-btn');
+  var out = document.getElementById('repair-scan-result');
+  btn.disabled = true;
+  btn.textContent = 'Scanning…';
+  out.style.display = 'block';
+  out.innerHTML = '<p class="text-muted">Comparing the latest preview run against sync history…</p>';
+
+  fetch('/api/crunchyroll/repair/scan', { method: 'POST' })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    btn.disabled = false;
+    btn.textContent = 'Run repair scan';
+    if (!d.ok) {
+      out.innerHTML = '<div class="alert alert-danger" style="margin:0">' + esc(d.error || 'Scan failed') + '</div>';
+      return;
+    }
+    var suspects = d.suspects || [];
+    if (!suspects.length) {
+      out.innerHTML = '<div class="alert alert-success" style="margin:0">No mis-mapped writes found across ' +
+        d.checked + ' watched season(s).</div>';
+      return;
+    }
+    var html = '<div class="alert alert-warning" style="margin:0 0 0.85rem">' +
+      suspects.length + ' write(s) look mis-mapped. Undo each on the History tab, then ' +
+      'apply the preview run so the correct entry gets the progress.</div>';
+    html += '<div style="overflow-x:auto"><table class="table"><thead><tr>' +
+      '<th>Written to</th><th style="width:90px">Progress</th>' +
+      '<th>Should have gone to</th><th>Why</th><th style="width:150px">Applied</th>' +
+      '</tr></thead><tbody>';
+    suspects.forEach(function(s) {
+      html += '<tr>';
+      html += '<td><div class="title-romaji">' + esc(s.show_title || ('AniList ' + s.anilist_id)) + '</div>' +
+              '<div class="title-english">AniList ' + s.anilist_id + '</div></td>';
+      html += '<td>ep ' + s.after_progress + '</td>';
+      html += '<td>AniList ' + s.correct_anilist_id + ' &middot; ep ' + s.correct_episode + '</td>';
+      html += '<td class="text-muted" style="font-size:0.85rem">' + esc(s.reason) + '</td>';
+      html += '<td class="text-muted" style="font-size:0.85rem">' + esc(s.applied_at) + '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+    out.innerHTML = html;
+  })
+  .catch(function(e){
+    btn.disabled = false;
+    btn.textContent = 'Run repair scan';
+    out.innerHTML = '<div class="alert alert-danger" style="margin:0">' + esc(String(e)) + '</div>';
+  });
+};
 
 var _pendingUnmappedMsg = sessionStorage.getItem('crUnmappedResult');
 if (_pendingUnmappedMsg) {

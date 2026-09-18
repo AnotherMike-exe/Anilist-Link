@@ -240,6 +240,7 @@ See `ARCHITECTURE.md` for detailed per-pillar architecture.
 ### Media Mapping Model
 - **Series Group**: Collection of AniList entries linked by SEQUEL/PREQUEL relations, sorted chronologically. Represents one logical "show."
 - **Season Mapping**: Each entry in a series group maps to a Plex season, using the entry's AniList title as the season display name.
+- **Season vs Cour**: A Roman numeral or `Nth Season` in an AniList title names the *season*; a bare `Part N` names a *cour within* that season. `parse_season_and_cour()` (`src/Matching/TitleMatcher.py`) is the single source of truth, used by both the CR season map and the restructurer. Crunchyroll numbers seasons the same way, so cours must share their parent's season number — numbering each cour separately mis-maps every later season. Episode numbers run continuously across a season's cours.
 - **Structure Adaptation**: Scanner auto-detects three Plex file structures (split folders, multi-season, absolute numbering) and maps accordingly. See `ARCHITECTURE.md` Section 8 for details.
 
 ---
@@ -360,7 +361,7 @@ Application-specific variables:
 ## Database
 
 ### Schema Overview (v1 — consolidated 1.0 baseline)
-Current tables (29):
+Current tables (30):
 - `media_mappings` - Maps media server library items to AniList IDs with confidence scores, match method, and optional series group reference
 - `users` - Linked AniList accounts with OAuth tokens
 - `sync_state` - Per-user, per-item sync tracking (last synced episode, timestamp, status)
@@ -389,6 +390,7 @@ Current tables (29):
 - `sonarr_series_cache` - Cached Sonarr series data (by TVDB ID)
 - `radarr_movie_cache` - Cached Radarr movie data (by TMDB ID)
 - `user_watchlist` - Cached AniList watchlist per linked user
+- `cr_unmapped_episodes` - Crunchyroll history the sync could not place on AniList (unknown season / no results), with per-row resolve or dismiss
 
 **New `app_settings` keys (Rate Your Completed Shows / Glance integration)**: `anilist.score_format`, `anilist.score_format_updated_at`, `app.show_unrated_completed`, `glance.api_key` — no new tables, `user_watchlist.score` already existed.
 
@@ -396,7 +398,7 @@ Current tables (29):
 
 ### Migration Strategy
 - All tables and indexes defined in `src/Database/Models.py` (TABLES, INDEXES dicts)
-- v1 creates the complete schema baseline; v2/v3 are incremental `ALTER TABLE` patches (current version: 3)
+- v1 creates the complete schema baseline; v2-v5 are incremental patches (current version: 5)
 - Database auto-creates on first run if not present
 - Migrations run automatically at startup
 
@@ -445,6 +447,9 @@ Current tables (29):
   - `POST /api/smart-move/preview`, `POST /api/smart-move/execute` - Filesystem "Fix Location" for a single library item **not** managed by Sonarr/Radarr; reuses the restructurer (franchise-root nesting, NFO, orphan cleanup) to relocate one on-disk folder
   - `GET /glance/rate-completed` - Key-gated iframe page for the Glance "Rate Your Completed Shows" widget
   - `POST /glance/rate-completed/submit` - Key-gated rating submission from the Glance widget
+  - `POST /api/crunchyroll/unmapped/{id}/map` - Write a dropped CR season's progress to a chosen AniList entry (audited in `cr_sync_log`, so undoable)
+  - `POST /api/crunchyroll/unmapped/{id}/dismiss` - Close an unmapped report without touching AniList
+  - `POST /api/crunchyroll/repair/scan` - Compare the latest preview run against sync history and report writes that landed on the wrong entry of a series group
   - `POST /arr-webhook` - Sonarr/Radarr webhook receiver
   - `POST /jellyfin/webhook` - Jellyfin webhook receiver (virtual season cleanup on TaskCompleted)
   - `GET /api/jellyfin/virtual-items` - Inspect virtual seasons (diagnostic)
@@ -702,8 +707,9 @@ alias alstop='docker-compose down'           # Stop Anilist-Link
 ### Common Pitfalls
 1. **AniList rate limiting**: Exceeding 90 req/min triggers 429 responses with exponential backoff. Always use the throttled client.
 2. **AniList outages**: AniList disables its public API from time to time (403 "temporarily disabled") and sometimes runs with a reduced limit. Never add a retry loop of your own around an AniList call — the client's circuit breaker raises `AniListUnavailableError` immediately while the API is down, and any new batch loop over AniList calls should check `anilist_client.health.is_down` and stop.
-3. **Crunchyroll API instability**: The reverse-engineered API may break without notice. Check `_resources/Research/` for latest findings.
-4. **Plex multi-user tokens**: Per-user tracking requires obtaining individual tokens via Plex.tv API, not just the server admin token.
+3. **Season maps and cours**: never renumber a franchise's season slots per cour — Crunchyroll's season numbers follow AniList's `Nth Season` labels, and shifting them breaks every later season. `tests/Unit/test_cr_season_mapping.py` pins Mushoku Tensei and Re:Zero together for exactly this reason; a change that fixes one by renumbering breaks the other.
+4. **Crunchyroll API instability**: The reverse-engineered API may break without notice. Check `_resources/Research/` for latest findings.
+5. **Plex multi-user tokens**: Per-user tracking requires obtaining individual tokens via Plex.tv API, not just the server admin token.
 
 ### Technical Debt
 **P2 — File Organization**: ✅ Complete

@@ -146,6 +146,7 @@ The key is required — `/glance/rate-completed` is the one endpoint in this app
 - [Developer Setup](docs/DEV-SETUP.md) - Development environment setup
 - [Quick Reference](docs/QUICK-REFERENCE.md) - Best practices and common commands
 - [Project Structure](docs/PROJECT-STRUCTURE.md) - Project organization reference
+- [Season Mapping Repair](docs/SEASON-MAPPING-REPAIR.md) - One-off cleanup for AniList entries affected by the Crunchyroll season-mapping bug
 
 ## Related Projects
 
