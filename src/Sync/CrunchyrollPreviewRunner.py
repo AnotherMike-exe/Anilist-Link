@@ -245,6 +245,41 @@ class CrunchyrollPreviewRunner:
     # Per-series preview computation
     # ==================================================================
 
+    async def _record_unmapped(
+        self,
+        user_id: str,
+        series_title: str,
+        cr_season: int,
+        cr_episode: int,
+        reason: str,
+        detail: str,
+    ) -> None:
+        """Persist a CR episode the preview could not place. See WatchSyncer."""
+        if not user_id:
+            return
+        try:
+            await self._db.record_cr_unmapped(
+                user_id=user_id,
+                series_title=series_title,
+                cr_season=cr_season,
+                cr_episode=cr_episode,
+                reason=reason,
+                detail=detail,
+            )
+        except Exception as exc:
+            logger.warning("Failed to record unmapped %s: %s", series_title, exc)
+
+    async def _clear_unmapped(
+        self, user_id: str, series_title: str, cr_season: int
+    ) -> None:
+        """Retire an open unmapped report once the season maps again."""
+        if not user_id:
+            return
+        try:
+            await self._db.clear_cr_unmapped(user_id, series_title, cr_season)
+        except Exception as exc:
+            logger.debug("Failed to clear unmapped %s: %s", series_title, exc)
+
     async def _process_series(
         self,
         series_title: str,
@@ -280,6 +315,14 @@ class CrunchyrollPreviewRunner:
                 seen_ids.add(r["id"])
 
         if not search_results:
+            await self._record_unmapped(
+                user_id,
+                series_title,
+                cr_season,
+                cr_episode,
+                "no_anilist_results",
+                "AniList returned no entries for this title",
+            )
             return False
 
         cache_key = series_title.lower()
@@ -296,7 +339,19 @@ class CrunchyrollPreviewRunner:
         )
 
         if not matched_entry:
+            known = ", ".join(str(sn) for sn in sorted(season_structure))
+            await self._record_unmapped(
+                user_id,
+                series_title,
+                cr_season,
+                cr_episode,
+                "unknown_season",
+                f"No AniList entry for season {cr_season}"
+                + (f" — the season map covers {known}" if known else ""),
+            )
             return False
+
+        await self._clear_unmapped(user_id, series_title, cr_season)
 
         anilist_id = matched_entry["id"]
         anilist_title = get_primary_title(matched_entry)

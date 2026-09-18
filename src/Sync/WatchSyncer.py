@@ -312,6 +312,14 @@ class WatchSyncer:
             if not search_results:
                 logger.warning("No AniList results found for: %s", series_title)
                 self._sync_results["no_matches_found"] += 1
+                await self._record_unmapped(
+                    user_id,
+                    series_title,
+                    cr_season,
+                    cr_episode,
+                    "no_anilist_results",
+                    "AniList returned no entries for this title",
+                )
                 return False
 
             logger.info("Found %d AniList entries", len(search_results))
@@ -338,7 +346,20 @@ class WatchSyncer:
                     "Could not determine correct AniList entry for %s", series_title
                 )
                 self._sync_results["no_matches_found"] += 1
+                known = ", ".join(str(sn) for sn in sorted(season_structure))
+                await self._record_unmapped(
+                    user_id,
+                    series_title,
+                    cr_season,
+                    cr_episode,
+                    "unknown_season",
+                    f"No AniList entry for season {cr_season}"
+                    + (f" — the season map covers {known}" if known else ""),
+                )
                 return False
+
+            # This (series, season) resolves again — retire any open report.
+            await self._clear_unmapped(user_id, series_title, cr_season)
 
             anime_id = matched_entry["id"]
             anime_title = get_primary_title(matched_entry)
@@ -452,6 +473,52 @@ class WatchSyncer:
         except Exception as exc:
             logger.error("Error processing %s: %s", series_title, exc)
             return False
+
+    # ==================================================================
+    # Unmapped reporting
+    # ==================================================================
+
+    async def _record_unmapped(
+        self,
+        user_id: str,
+        series_title: str,
+        cr_season: int,
+        cr_episode: int,
+        reason: str,
+        detail: str,
+    ) -> None:
+        """Persist a CR episode the sync could not place.
+
+        Without this a mis-mapped or unmappable episode left no trace a user
+        could see: cr_sync_log records only successful writes, so nothing was
+        written and nothing showed up in the history.
+        """
+        if self._dry_run or not user_id:
+            return
+        episode_data = self._episode_data_cache.get((series_title, cr_season), {})
+        try:
+            await self._db.record_cr_unmapped(
+                user_id=user_id,
+                series_title=series_title,
+                cr_season=cr_season,
+                cr_episode=cr_episode,
+                reason=reason,
+                detail=detail,
+                season_title=episode_data.get("season_title", ""),
+            )
+        except Exception as exc:
+            logger.warning("Failed to record unmapped %s: %s", series_title, exc)
+
+    async def _clear_unmapped(
+        self, user_id: str, series_title: str, cr_season: int
+    ) -> None:
+        """Retire an open unmapped report once the season maps again."""
+        if self._dry_run or not user_id:
+            return
+        try:
+            await self._db.clear_cr_unmapped(user_id, series_title, cr_season)
+        except Exception as exc:
+            logger.debug("Failed to clear unmapped %s: %s", series_title, exc)
 
     # ==================================================================
     # Movie processing

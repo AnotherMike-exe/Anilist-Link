@@ -14,7 +14,7 @@ from src.Database.Models import INDEXES, TABLES
 
 logger = logging.getLogger(__name__)
 
-LATEST_VERSION = 4
+LATEST_VERSION = 5
 
 
 async def run_migrations(db: aiosqlite.Connection) -> None:
@@ -30,6 +30,8 @@ async def run_migrations(db: aiosqlite.Connection) -> None:
         await _apply_v3(db)
     if current < 4:
         await _apply_v4(db)
+    if current < 5:
+        await _apply_v5(db)
 
 
 async def _get_current_version(db: aiosqlite.Connection) -> int:
@@ -146,3 +148,24 @@ async def _apply_v4(db: aiosqlite.Connection) -> None:
     await db.execute("INSERT INTO schema_version (version) VALUES (?)", (4,))
     await db.commit()
     logger.info("Migration v4 applied: season mappings now carry episode ranges")
+
+
+async def _apply_v5(db: aiosqlite.Connection) -> None:
+    """Add cr_unmapped_episodes — Crunchyroll history the sync could not place.
+
+    Until now a CR episode that had no AniList target left no trace anywhere a
+    user could see: cr_sync_log only records successful writes, so a refused or
+    skipped mapping was invisible. Re:Zero season 4 Part 2 disappeared exactly
+    this way — the old code folded the unknown season onto season 1, which was
+    already COMPLETED, so nothing was written and nothing was logged above DEBUG.
+    """
+    logger.info("Applying migration v5: cr_unmapped_episodes")
+
+    await db.execute(TABLES["cr_unmapped_episodes"])
+    for index_ddl in INDEXES:
+        if "cr_unmapped_episodes" in index_ddl:
+            await db.execute(index_ddl)
+
+    await db.execute("INSERT INTO schema_version (version) VALUES (?)", (5,))
+    await db.commit()
+    logger.info("Migration v5 applied: cr_unmapped_episodes created")

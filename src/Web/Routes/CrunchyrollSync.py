@@ -40,6 +40,7 @@ async def crunchyroll_hub(
     active_run_id = run_id
     runs: list[dict] = []
     log_entries: list[dict] = []
+    unmapped: list[dict] = []
     latest_sync_run_id = ""
 
     if user:
@@ -51,6 +52,7 @@ async def crunchyroll_hub(
         log_entries = await db.get_cr_sync_log(user_id=user["user_id"], limit=500)
         if log_entries:
             latest_sync_run_id = log_entries[0]["sync_run_id"]
+        unmapped = await db.get_cr_unmapped(user_id=user["user_id"])
 
     # Enrich history entries — anilist_cache first, user_watchlist fallback
     # (CR-synced entries often aren't in anilist_cache since the preview
@@ -104,6 +106,7 @@ async def crunchyroll_hub(
             "run_id": active_run_id,
             "runs": runs,
             "log_entries": enriched_log,
+            "unmapped": unmapped,
             "latest_sync_run_id": latest_sync_run_id,
             "user": user,
             "active_tab": tab,
@@ -565,3 +568,125 @@ async def cr_anilist_search(request: Request, q: str = "") -> JSONResponse:
     ]
 
     return JSONResponse({"ok": True, "results": simplified})
+
+
+# ---------------------------------------------------------------------------
+# Unmapped CR episodes — history the sync could not place
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/crunchyroll/unmapped/{row_id}/map")
+async def map_unmapped_episode(request: Request, row_id: int) -> JSONResponse:
+    """Write an unmapped CR episode's progress to a user-chosen AniList entry.
+
+    This is the repair path for history the sync silently dropped: the user picks
+    the entry the season belongs to, the episode reached on Crunchyroll is
+    written to it, and the report is closed. The write goes through the same
+    cr_sync_log audit trail as a normal sync, so it can be undone from History.
+    """
+    db = request.app.state.db
+    anilist_client = request.app.state.anilist_client
+
+    payload = await request.json()
+    try:
+        anilist_id = int(payload.get("anilist_id") or 0)
+    except (TypeError, ValueError):
+        anilist_id = 0
+    if not anilist_id:
+        return JSONResponse(
+            {"ok": False, "error": "anilist_id is required"}, status_code=400
+        )
+
+    row = await db.get_cr_unmapped_entry(row_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
+    if row.get("resolved_at"):
+        return JSONResponse({"ok": False, "error": "Already resolved"}, status_code=400)
+
+    users = await db.get_users_by_service("anilist")
+    user = next((u for u in users if u["user_id"] == row["user_id"]), None)
+    if not user:
+        return JSONResponse({"ok": False, "error": "User not found"}, status_code=404)
+
+    # Let the caller override the episode (the recorded one is the highest the
+    # sync saw, which is what the user watched unless they say otherwise).
+    try:
+        progress = int(payload.get("episode") or row["cr_episode"])
+    except (TypeError, ValueError):
+        progress = row["cr_episode"]
+    if progress < 0:
+        return JSONResponse(
+            {"ok": False, "error": "episode must not be negative"}, status_code=400
+        )
+
+    access_token = user["access_token"]
+    anilist_user_id = user["anilist_id"]
+
+    try:
+        media = await anilist_client.get_anime_by_id(anilist_id)
+        total_episodes = (media or {}).get("episodes")
+        existing = await anilist_client.get_anime_list_entry(
+            anilist_id, access_token, anilist_user_id
+        )
+        before_status = (existing or {}).get("status") or ""
+        before_progress = (existing or {}).get("progress") or 0
+
+        if before_status == "COMPLETED" and before_progress >= progress:
+            # Never walk a finished entry backwards — same guard the syncers use.
+            await db.resolve_cr_unmapped(row_id, anilist_id)
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "skipped": True,
+                    "message": (
+                        f"AniList entry already COMPLETED at episode "
+                        f"{before_progress}; left unchanged and report closed."
+                    ),
+                }
+            )
+
+        finished = total_episodes is not None and progress >= int(total_episodes)
+        status = "COMPLETED" if finished else "CURRENT"
+        updated = await anilist_client.update_anime_progress(
+            anilist_id, access_token, progress, status
+        )
+        if not updated:
+            return JSONResponse(
+                {"ok": False, "error": "AniList update failed"}, status_code=500
+            )
+
+        show_title = get_primary_title(media or {}) if media else row["series_title"]
+        await db.insert_cr_sync_log_entry(
+            user_id=row["user_id"],
+            anilist_id=anilist_id,
+            show_title=show_title,
+            before_status=before_status,
+            before_progress=before_progress,
+            after_status=status,
+            after_progress=progress,
+            sync_run_id="manual-unmapped-fix",
+        )
+        await db.resolve_cr_unmapped(row_id, anilist_id)
+        return JSONResponse(
+            {
+                "ok": True,
+                "anilist_id": anilist_id,
+                "progress": progress,
+                "status": status,
+                "title": show_title,
+            }
+        )
+    except Exception as exc:
+        logger.exception("Mapping unmapped row %s failed", row_id)
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
+@router.post("/api/crunchyroll/unmapped/{row_id}/dismiss")
+async def dismiss_unmapped_episode(request: Request, row_id: int) -> JSONResponse:
+    """Close an unmapped report without writing anything to AniList."""
+    db = request.app.state.db
+    row = await db.get_cr_unmapped_entry(row_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
+    await db.resolve_cr_unmapped(row_id, None)
+    return JSONResponse({"ok": True})

@@ -550,6 +550,23 @@ TABLES: dict[str, str] = {
             cr_sync_preview_id INTEGER
         )
     """,
+    "cr_unmapped_episodes": """
+        CREATE TABLE IF NOT EXISTS cr_unmapped_episodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL DEFAULT '',
+            series_title TEXT NOT NULL DEFAULT '',
+            season_title TEXT NOT NULL DEFAULT '',
+            cr_season INTEGER NOT NULL DEFAULT 0,
+            cr_episode INTEGER NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT '',
+            first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+            resolved_at TEXT,
+            resolved_anilist_id INTEGER,
+            UNIQUE(user_id, series_title, cr_season)
+        )
+    """,
     "watch_sync_log": """
         CREATE TABLE IF NOT EXISTS watch_sync_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -734,6 +751,8 @@ INDEXES: list[str] = [
     # cr_sync
     "CREATE INDEX IF NOT EXISTS idx_cr_sync_preview_run" " ON cr_sync_preview(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_cr_sync_log_anilist" " ON cr_sync_log(anilist_id)",
+    "CREATE INDEX IF NOT EXISTS idx_cr_unmapped_open"
+    " ON cr_unmapped_episodes(user_id, resolved_at)",
     "CREATE INDEX IF NOT EXISTS idx_watch_sync_log_anilist"
     " ON watch_sync_log(anilist_id)",
     "CREATE INDEX IF NOT EXISTS idx_watch_sync_log_source" " ON watch_sync_log(source)",

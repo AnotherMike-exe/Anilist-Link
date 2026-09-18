@@ -1728,6 +1728,101 @@ class DatabaseManager:
             (log_id,),
         )
 
+    # ------------------------------------------------------------------
+    # cr_unmapped_episodes — CR history the sync could not place
+    # ------------------------------------------------------------------
+
+    async def record_cr_unmapped(
+        self,
+        user_id: str,
+        series_title: str,
+        cr_season: int,
+        cr_episode: int,
+        reason: str,
+        detail: str = "",
+        season_title: str = "",
+    ) -> None:
+        """Record (or refresh) a CR episode that had no AniList target.
+
+        Keyed on (user_id, series_title, cr_season) so repeated syncs update one
+        row instead of piling up, keeping the highest episode seen. Re-recording
+        a row the user already resolved reopens it, because a season that still
+        cannot be mapped is still a problem.
+        """
+        await self.execute(
+            """INSERT INTO cr_unmapped_episodes
+                   (user_id, series_title, season_title, cr_season, cr_episode,
+                    reason, detail)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, series_title, cr_season) DO UPDATE SET
+                   cr_episode = MAX(cr_episode, excluded.cr_episode),
+                   season_title = excluded.season_title,
+                   reason = excluded.reason,
+                   detail = excluded.detail,
+                   last_seen_at = datetime('now'),
+                   resolved_at = NULL,
+                   resolved_anilist_id = NULL
+            """,
+            (
+                user_id,
+                series_title,
+                season_title,
+                cr_season,
+                cr_episode,
+                reason,
+                detail,
+            ),
+        )
+
+    async def clear_cr_unmapped(
+        self, user_id: str, series_title: str, cr_season: int
+    ) -> None:
+        """Drop the unmapped row for a (series, season) that now maps cleanly."""
+        await self.execute(
+            "DELETE FROM cr_unmapped_episodes"
+            " WHERE user_id=? AND series_title=? AND cr_season=?",
+            (user_id, series_title, cr_season),
+        )
+
+    async def get_cr_unmapped(
+        self, user_id: str | None = None, include_resolved: bool = False
+    ) -> list[dict[str, Any]]:
+        """Return unmapped CR episodes, most recently seen first."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if user_id:
+            clauses.append("user_id=?")
+            params.append(user_id)
+        if not include_resolved:
+            clauses.append("resolved_at IS NULL")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return await self.fetch_all(
+            f"SELECT * FROM cr_unmapped_episodes{where}"
+            " ORDER BY last_seen_at DESC, series_title, cr_season",
+            tuple(params),
+        )
+
+    async def get_cr_unmapped_entry(self, row_id: int) -> dict[str, Any] | None:
+        """Return a single cr_unmapped_episodes row."""
+        return await self.fetch_one(
+            "SELECT * FROM cr_unmapped_episodes WHERE id=?", (row_id,)
+        )
+
+    async def resolve_cr_unmapped(
+        self, row_id: int, anilist_id: int | None = None
+    ) -> None:
+        """Mark an unmapped row resolved.
+
+        ``anilist_id`` records the entry the user mapped it to; omit it when the
+        user is simply dismissing a row they do not want to track.
+        """
+        await self.execute(
+            "UPDATE cr_unmapped_episodes"
+            " SET resolved_at=datetime('now'), resolved_anilist_id=?"
+            " WHERE id=?",
+            (anilist_id, row_id),
+        )
+
     async def was_cr_sync_target_undone(
         self,
         user_id: str,

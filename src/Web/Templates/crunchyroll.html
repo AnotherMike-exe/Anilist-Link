@@ -114,10 +114,15 @@
     History
     {% if log_entries %}<span class="cr-tab-count">{{ log_entries | length }}</span>{% endif %}
   </button>
+  <button class="cr-tab {% if active_tab == 'unmapped' %}cr-tab-active{% endif %}"
+          id="tab-unmapped" onclick="switchTab('unmapped')">
+    Unmapped
+    {% if unmapped %}<span class="cr-tab-count cr-tab-count-warn">{{ unmapped | length }}</span>{% endif %}
+  </button>
 </div>
 
 {# ── PREVIEW TAB ──────────────────────────────────────────────────────── #}
-<div id="pane-preview" {% if active_tab == 'history' %}style="display:none"{% endif %}>
+<div id="pane-preview" {% if active_tab != 'preview' and active_tab %}style="display:none"{% endif %}>
 
   {# Filter + bulk-action toolbar #}
   <div class="cr-toolbar">
@@ -451,6 +456,75 @@
   {% endif %}
 </div>
 
+{# ── UNMAPPED TAB ─────────────────────────────────────────────────────── #}
+<div id="pane-unmapped" {% if active_tab != 'unmapped' %}style="display:none"{% endif %}>
+
+  <p class="text-muted" style="margin-bottom:1rem;max-width:64ch">
+    Crunchyroll history the sync could not place on AniList. These episodes are
+    <strong>not</strong> recorded on your list — previously they failed silently,
+    because the History tab only logs writes that actually happened. Pick the
+    right AniList entry and the episode you reached will be written to it.
+  </p>
+
+  <div id="unmapped-result" class="alert" style="display:none;margin-bottom:1rem"></div>
+
+  {% if not unmapped %}
+  <div class="card" style="text-align:center;padding:3rem 1.5rem">
+    <p style="margin-bottom:0.35rem">Nothing unmapped.</p>
+    <p class="text-muted" style="font-size:0.9rem">
+      Every series in your recent Crunchyroll history resolved to an AniList entry.
+    </p>
+  </div>
+  {% else %}
+  <div style="overflow-x:auto">
+  <table class="table" id="unmapped-table">
+    <thead>
+      <tr>
+        <th>Crunchyroll series</th>
+        <th style="width:110px">CR season</th>
+        <th style="width:110px">Episode</th>
+        <th>Why it could not be placed</th>
+        <th style="width:140px">Last seen</th>
+        <th style="width:190px"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in unmapped %}
+      <tr data-row-id="{{ item.id }}">
+        <td>
+          <div class="title-romaji">{{ item.series_title }}</div>
+          {% if item.season_title and item.season_title != item.series_title %}
+          <div class="title-english">{{ item.season_title }}</div>
+          {% endif %}
+        </td>
+        <td>S{{ item.cr_season }}</td>
+        <td>E{{ item.cr_episode }}</td>
+        <td class="text-muted" style="font-size:0.88rem">
+          {{ item.detail or item.reason }}
+        </td>
+        <td class="text-muted" style="font-size:0.85rem">{{ item.last_seen_at }}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <button class="btn btn-primary btn-sm"
+                  data-row-id="{{ item.id }}"
+                  data-series="{{ item.series_title }}"
+                  data-episode="{{ item.cr_episode }}"
+                  onclick="openUnmappedFix(this.dataset.rowId, this.dataset.series, this.dataset.episode)">
+            Map to AniList…
+          </button>
+          <button class="btn btn-secondary btn-sm"
+                  data-row-id="{{ item.id }}"
+                  onclick="dismissUnmapped(this.dataset.rowId)">
+            Dismiss
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</div>
+
 {% endif %}{# end if user #}
 
 {# ── Rematch modal ────────────────────────────────────────────────────── #}
@@ -552,6 +626,7 @@
   border-radius: 10px;
 }
 .cr-tab-active .cr-tab-count { background: rgba(61,180,242,0.15); color: var(--accent); }
+.cr-tab-count-warn { background: rgba(255,152,0,0.18); color: #ff9800; }
 
 .cr-toolbar {
   display: flex;
@@ -720,7 +795,7 @@ window.openCrHistoryDetail = function (idx) {
 
 // ── Tab switching ──────────────────────────────────────────────────────
 window.switchTab = function (tab) {
-  ['preview','history'].forEach(function(t) {
+  ['preview','history','unmapped'].forEach(function(t) {
     document.getElementById('pane-' + t).style.display = t === tab ? '' : 'none';
     document.getElementById('tab-' + t).classList.toggle('cr-tab-active', t === tab);
     var ss = document.getElementById('stats-strip-' + t);
@@ -1138,7 +1213,48 @@ window.undoEntry = function (logId, showTitle) {
 var _rematchEntryId = null;
 var _rematchCrTitle = '';
 
+// Which flow the rematch modal is serving: 'preview' (re-point a preview row)
+// or 'unmapped' (write a dropped CR season's progress to a chosen entry).
+var _rematchMode = 'preview';
+var _unmappedRowId = null;
+var _unmappedEpisode = 0;
+
+window.openUnmappedFix = function (rowId, seriesTitle, episode) {
+  _rematchMode = 'unmapped';
+  _unmappedRowId = rowId;
+  _unmappedEpisode = parseInt(episode, 10) || 0;
+  _rematchCrTitle = seriesTitle;
+  document.getElementById('rematch-source-title').textContent =
+    seriesTitle + ' — episode ' + _unmappedEpisode;
+  var input = document.getElementById('rematch-search-input');
+  input.value = seriesTitle;
+  document.getElementById('rematch-results').innerHTML = '';
+  document.getElementById('rematch-modal').style.display = 'flex';
+  searchRematch();
+  setTimeout(function() { input.focus(); input.select(); }, 100);
+};
+
+window.dismissUnmapped = function (rowId) {
+  if (!confirm('Close this report without writing anything to AniList?')) return;
+  fetch('/api/crunchyroll/unmapped/' + rowId + '/dismiss', { method: 'POST' })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    if (d.ok) location.reload();
+    else showUnmappedResult(false, d.error || 'Unknown error');
+  })
+  .catch(function(e){ showUnmappedResult(false, String(e)); });
+};
+
+function showUnmappedResult(ok, message) {
+  var el = document.getElementById('unmapped-result');
+  if (!el) return;
+  el.className = 'alert ' + (ok ? 'alert-success' : 'alert-danger');
+  el.textContent = message;
+  el.style.display = 'block';
+}
+
 window.openRematch = function (entryId, crTitle) {
+  _rematchMode = 'preview';
   _rematchEntryId = entryId;
   _rematchCrTitle = crTitle;
   document.getElementById('rematch-source-title').textContent = crTitle;
@@ -1190,6 +1306,26 @@ window.searchRematch = function () {
 };
 
 window.selectRematch = function (anilistId, anilistTitle) {
+  if (_rematchMode === 'unmapped') {
+    if (!_unmappedRowId) return;
+    fetch('/api/crunchyroll/unmapped/' + _unmappedRowId + '/map', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ anilist_id: anilistId, episode: _unmappedEpisode }),
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      closeRematch();
+      if (!d.ok) { showUnmappedResult(false, d.error || 'Unknown error'); return; }
+      var msg = d.skipped
+        ? d.message
+        : 'Set ' + (d.title || anilistTitle) + ' to episode ' + d.progress +
+          ' (' + d.status + '). Undo it from the History tab if that is wrong.';
+      sessionStorage.setItem('crUnmappedResult', msg);
+      location.reload();
+    })
+    .catch(function(e){ closeRematch(); showUnmappedResult(false, String(e)); });
+    return;
+  }
   if (!_rematchEntryId || !RUN_ID) return;
   fetch('/api/crunchyroll/preview/' + RUN_ID + '/update-entry', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1208,6 +1344,12 @@ function esc(str) {
   var d = document.createElement('div');
   d.textContent = str;
   return d.innerHTML;
+}
+
+var _pendingUnmappedMsg = sessionStorage.getItem('crUnmappedResult');
+if (_pendingUnmappedMsg) {
+  sessionStorage.removeItem('crUnmappedResult');
+  showUnmappedResult(true, _pendingUnmappedMsg);
 }
 
 document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeRematch(); });
