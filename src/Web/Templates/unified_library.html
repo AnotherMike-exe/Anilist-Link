@@ -40,6 +40,11 @@
 <!-- Toolbar row 2: search -->
 <div class="lib-toolbar-row2">
     <input type="text" id="searchInput" class="search-input" placeholder="Search titles&hellip;" oninput="applyFilters()">
+    <span class="text-muted" style="font-size:0.8rem;margin-left:0.5rem">
+        Use the &#9662; on any column header to sort or filter it.
+    </span>
+    <button type="button" class="btn btn-secondary btn-xs" onclick="clearLibraryFilters()"
+            title="Reset search and all column filters">Clear filters</button>
 </div>
 
 <!-- Grid view -->
@@ -52,6 +57,8 @@
          data-title="{{ (item.title or '') | lower }} {{ (item.title_romaji or '') | lower }} {{ (item.title_english or '') | lower }} {{ (item.title_native or '') | lower }} {{ (item.title_synonyms or '') | lower }}"
          data-matched="{{ 'yes' if item.anilist_id else 'no' }}"
          data-source="{{ item.source }}"
+         data-arr="{{ item.arr_status }}"
+         data-filter-arr="{{ item.arr_status }}"
          onclick="openEntryDetail({{ loop.index0 }})">
         <div class="media-card-poster">
             {% if item.cover_url %}
@@ -86,17 +93,18 @@
 
 <!-- List view -->
 <div class="table-scroll-container hidden" id="listView">
-    <table class="library-table">
+    <table class="library-table" id="libraryListTable">
         <thead>
             <tr>
                 <th></th>
                 <th class="sortable-th" data-col="title" onclick="sortLibrary('title')">Title <span class="sort-indicator">&#x2195;</span></th>
                 <th class="sortable-th" data-col="year" onclick="sortLibrary('year')">Year <span class="sort-indicator">&#x2195;</span></th>
-                <th>Episodes</th>
-                <th>Status</th>
-                <th>Source</th>
-                <th>AniList Match</th>
+                <th class="sortable-th" data-col="episodes" onclick="sortLibrary('episodes')">Episodes <span class="sort-indicator">&#x2195;</span></th>
+                <th class="sortable-th" data-col="status" onclick="sortLibrary('status')">Status <span class="sort-indicator">&#x2195;</span></th>
+                <th class="sortable-th" data-col="source" onclick="sortLibrary('source')">Source <span class="sort-indicator">&#x2195;</span></th>
+                <th class="sortable-th" data-col="matched" onclick="sortLibrary('matched')">AniList Match <span class="sort-indicator">&#x2195;</span></th>
                 <th class="sortable-th" data-col="confidence" onclick="sortLibrary('confidence')">Confidence <span class="sort-indicator">&#x2195;</span></th>
+                <th class="sortable-th" data-col="arr" onclick="sortLibrary('arr')">*arr <span class="sort-indicator">&#x2195;</span></th>
                 <th>Actions</th>
             </tr>
         </thead>
@@ -111,6 +119,19 @@
                 data-sort-title="{{ (item.title_romaji or item.title or '') | lower }}"
                 data-sort-year="{{ item.year or 0 }}"
                 data-sort-confidence="{{ item.match_confidence or 0 }}"
+                data-sort-episodes="{{ item.episodes or 0 }}"
+                data-sort-status="{{ item.anilist_status or '' }}"
+                data-sort-source="{{ item.source }}"
+                data-sort-matched="{{ 'yes' if item.anilist_id else 'no' }}"
+                data-filter-title="{{ primary_title|e }}"
+                data-filter-year="{{ item.year or '' }}"
+                data-filter-episodes="{{ item.episodes or '' }}"
+                data-filter-status="{{ item.anilist_status or '' }}"
+                data-filter-source="{{ item.source }}"
+                data-filter-matched="{{ 'Matched' if item.anilist_id else 'Unmatched' }}"
+                data-arr="{{ item.arr_status }}"
+                data-sort-arr="{{ item.arr_status }}{{ item.arr_service }}"
+                data-filter-arr="{{ item.arr_status }}"
                 style="cursor:pointer"
                 onclick="openEntryDetail({{ loop.index0 }})">
                 <td style="width:48px" onclick="event.stopPropagation()">
@@ -176,11 +197,41 @@
                     <span style="color:var(--text-muted)">&mdash;</span>
                     {% endif %}
                 </td>
+                <td onclick="event.stopPropagation()">
+                    {% if item.arr_status != 'untracked' %}
+                    <span class="badge {% if item.arr_status == 'monitored' %}arr-monitored arr-{{ item.arr_service }}{% else %}arr-tracked{% endif %}">
+                        {{ item.arr_service | title }} {% if item.arr_status == 'monitored' %}&#9679;{% else %}&#9675;{% endif %}
+                    </span>
+                    {% if item.sonarr_season %}
+                    <div style="font-size:0.75rem;color:var(--text-muted)">S{{ item.sonarr_season }}</div>
+                    {% endif %}
+                    {% else %}
+                    <span style="color:var(--text-muted)">&mdash;</span>
+                    {% endif %}
+                </td>
                 <td style="white-space:nowrap" onclick="event.stopPropagation()">
+                    <div class="action-btns">
                     <button class="btn btn-secondary btn-xs" onclick="openMatchModal({{ loop.index0 }})" style="flex-shrink:0">Edit</button>
                     {% if item.anilist_id %}
                     <button class="btn btn-secondary btn-xs" onclick="refreshItem({{ loop.index0 }})" style="flex-shrink:0" title="Refresh metadata">&#x21BB;</button>
                     {% endif %}
+                    {# *arr controls mirror the watchlist. Only for matched
+                       items — an unmatched row has no AniList entry to link. #}
+                    {% if arr_enabled and item.anilist_id %}
+                    {% if item.arr_status == 'untracked' %}
+                    <a class="btn btn-secondary btn-xs"
+                       href="/watchlist?q={{ (item.title_romaji or item.title or '')|urlencode }}"
+                       title="Open this title in the watchlist to add it to Sonarr/Radarr">+ Add</a>
+                    {% else %}
+                    <button class="btn btn-secondary btn-xs"
+                            onclick="verifyArrLink({{ item.anilist_id }}, this)"
+                            title="Re-check against Sonarr/Radarr and correct the stored path. Never moves files.">Verify Link</button>
+                    <button class="btn btn-secondary btn-xs"
+                            onclick="unlinkFromArr({{ item.anilist_id }}, '{{ (item.title_romaji or item.title or '')|e }}')"
+                            title="Remove this Sonarr/Radarr link from our database. Does not change Sonarr/Radarr.">Unlink</button>
+                    {% endif %}
+                    {% endif %}
+                    </div>
                 </td>
             </tr>
             {% endfor %}
@@ -226,6 +277,63 @@ function setView(v) {
     document.getElementById('listViewBtn').classList.toggle('active', v === 'list');
 }
 
+var libColFilters = null;
+
+document.addEventListener('DOMContentLoaded', function() {
+    if (typeof TableFilters !== 'function') return;
+    libColFilters = new TableFilters({
+        tableId: 'libraryListTable',
+        rowSelector: '#listView .library-row',
+        onChange: function() { applyFilters(); },
+        onSort: function(col, dir) { sortLibrary(col, dir); }
+    });
+});
+
+// *arr actions. Verify and Unlink are single calls, so they live here rather
+// than pulling in the watchlist's add/preview machinery.
+window.verifyArrLink = async function(anilistId, btn) {
+    btn.disabled = true;
+    var orig = btn.textContent;
+    btn.textContent = '\u2026';
+    try {
+        var resp = await fetch('/api/arr/verify-link', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({anilist_id: anilistId})
+        });
+        var data = await resp.json();
+        alert(data.message || data.error || 'No result');
+        if (data.changed) window.location.reload();
+    } catch (e) {
+        alert('Verify failed: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+    }
+};
+
+window.unlinkFromArr = async function(anilistId, title) {
+    if (!confirm('Remove the Sonarr/Radarr link for "' + title + '"?\n\nThis only clears our records \u2014 it does not remove anything from Sonarr or Radarr.')) return;
+    try {
+        var resp = await fetch('/api/library/unlink-from-arr', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({anilist_id: anilistId})
+        });
+        var data = await resp.json();
+        if (data.ok) window.location.reload();
+        else alert('Unlink failed: ' + (data.error || 'unknown error'));
+    } catch (e) {
+        alert('Unlink failed: ' + e);
+    }
+};
+
+function clearLibraryFilters() {
+    document.getElementById('searchInput').value = '';
+    document.getElementById('matchFilter').value = 'all';
+    if (libColFilters) libColFilters.clear(); else applyFilters();
+}
+
 function applyFilters() {
     var q = document.getElementById('searchInput').value.toLowerCase();
     var mf = document.getElementById('matchFilter').value;
@@ -237,14 +345,17 @@ function applyFilters() {
         if (q && title.indexOf(q) === -1) return false;
         if (mf === 'matched' && matched !== 'yes') return false;
         if (mf === 'unmatched' && matched !== 'no') return false;
+        if (libColFilters && !libColFilters.passes(el)) return false;
         return true;
     }
     gridCards.forEach(function(el) { el.classList.toggle('hidden', !matches(el)); });
     listRows.forEach(function(el) { el.style.display = matches(el) ? '' : 'none'; });
 }
 
-function sortLibrary(col) {
-    if (libSortCol === col) { libSortDir = -libSortDir; } else { libSortCol = col; libSortDir = 1; }
+function sortLibrary(col, dir) {
+    if (dir) { libSortCol = col; libSortDir = dir; }
+    else if (libSortCol === col) { libSortDir = -libSortDir; }
+    else { libSortCol = col; libSortDir = 1; }
     document.querySelectorAll('#listView .sortable-th').forEach(function(th) {
         th.classList.remove('sort-asc', 'sort-desc');
         var ind = th.querySelector('.sort-indicator');
@@ -261,7 +372,7 @@ function sortLibrary(col) {
     rows.sort(function(a, b) {
         var av = a.getAttribute('data-sort-' + col) || '';
         var bv = b.getAttribute('data-sort-' + col) || '';
-        if (col === 'year' || col === 'confidence') return (parseFloat(av) - parseFloat(bv)) * libSortDir;
+        if (col === 'year' || col === 'confidence' || col === 'episodes') return (parseFloat(av) - parseFloat(bv)) * libSortDir;
         return av.localeCompare(bv) * libSortDir;
     });
     rows.forEach(function(r) { tbody.appendChild(r); });

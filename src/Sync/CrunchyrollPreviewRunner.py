@@ -67,6 +67,10 @@ class CrunchyrollPreviewRunner:
         self._seen: set[tuple[str, int]] = set()
         # Raw episode list per (series_title, cr_season) for episode detail view
         self._raw_episodes: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        # Highest CR episode seen per (series_title, cr_season) across the whole
+        # run — not per page, which is what made a series straddling a page
+        # boundary get evaluated twice at two different episode numbers.
+        self._series_max: dict[tuple[str, int], int] = {}
 
     # ==================================================================
     # Public entry point
@@ -84,6 +88,7 @@ class CrunchyrollPreviewRunner:
         self._preview_rows.clear()
         self._seen.clear()
         self._raw_episodes.clear()
+        self._series_max.clear()
 
         logger.info(
             "Starting CR preview scan for user %s (run_id=%s)",
@@ -109,6 +114,7 @@ class CrunchyrollPreviewRunner:
             return self._run_id
 
         if self._preview_rows:
+            self._refresh_episode_details()
             await self._db.insert_cr_preview_rows(self._preview_rows)
             logger.info(
                 "Preview run %s written %d rows", self._run_id, len(self._preview_rows)
@@ -171,7 +177,37 @@ class CrunchyrollPreviewRunner:
         skipped = 0
         series_progress = self._group_episodes(episodes)
 
-        for (series_title, cr_season), cr_episode in series_progress.items():
+        for (series_title, cr_season), page_episode in series_progress.items():
+            if self._anilist.health.is_down:
+                logger.warning(
+                    "Crunchyroll preview halted — AniList API unavailable (%s)",
+                    self._anilist.health.reason,
+                )
+                break
+
+            key = (series_title, cr_season)
+            already = self._series_max.get(key)
+            if already is not None and page_episode <= already:
+                # Crunchyroll history is newest-first, so a later page carries
+                # *earlier* episodes of a series that straddles the page
+                # boundary. Evaluating it again at that lower number produced a
+                # second row proposing less progress than the first — Demon
+                # Slayer was offered at episode 7 while its episode list ran to
+                # 11. The highest episode already stands.
+                logger.debug(
+                    "%s season %d already evaluated at episode %d, skipping "
+                    "page episode %d",
+                    series_title,
+                    cr_season,
+                    already,
+                    page_episode,
+                )
+                skipped += 1
+                continue
+
+            cr_episode = max(already or 0, page_episode)
+            self._series_max[key] = cr_episode
+
             try:
                 produced = await self._process_series(
                     series_title, cr_season, cr_episode, user
@@ -183,6 +219,23 @@ class CrunchyrollPreviewRunner:
                 skipped += 1
 
         return skipped
+
+    def _refresh_episode_details(self) -> None:
+        """Re-attach the full episode list to each row once paging is done.
+
+        A row is built while its page is being processed, but ``_raw_episodes``
+        keeps filling as later pages arrive. Without this the episode detail a
+        row carries is whatever had been collected at that moment, which is why
+        a row's episode list and its proposed progress could disagree.
+        """
+        for row in self._preview_rows:
+            key = (row.get("cr_title", ""), row.get("cr_season", 0))
+            raw = self._raw_episodes.get(key)
+            if raw is None:
+                continue
+            row["episodes_json"] = json.dumps(
+                sorted(raw, key=lambda e: (e["cr_season"], e["cr_episode"]))
+            )
 
     def _group_episodes(
         self, episodes: list[CrunchyrollEpisode]
@@ -218,6 +271,10 @@ class CrunchyrollPreviewRunner:
                 key = (ep.series_title, ep.season)
                 if key not in progress or ep.episode_number > progress[key]:
                     progress[key] = ep.episode_number
+                if ep.season_title:
+                    self._episode_data_cache.setdefault(key, {})[
+                        "season_title"
+                    ] = ep.season_title
                 if key not in self._raw_episodes:
                     self._raw_episodes[key] = []
                 known = {e["cr_episode"] for e in self._raw_episodes[key]}
@@ -238,6 +295,41 @@ class CrunchyrollPreviewRunner:
     # ==================================================================
     # Per-series preview computation
     # ==================================================================
+
+    async def _record_unmapped(
+        self,
+        user_id: str,
+        series_title: str,
+        cr_season: int,
+        cr_episode: int,
+        reason: str,
+        detail: str,
+    ) -> None:
+        """Persist a CR episode the preview could not place. See WatchSyncer."""
+        if not user_id:
+            return
+        try:
+            await self._db.record_cr_unmapped(
+                user_id=user_id,
+                series_title=series_title,
+                cr_season=cr_season,
+                cr_episode=cr_episode,
+                reason=reason,
+                detail=detail,
+            )
+        except Exception as exc:
+            logger.warning("Failed to record unmapped %s: %s", series_title, exc)
+
+    async def _clear_unmapped(
+        self, user_id: str, series_title: str, cr_season: int
+    ) -> None:
+        """Retire an open unmapped report once the season maps again."""
+        if not user_id:
+            return
+        try:
+            await self._db.clear_cr_unmapped(user_id, series_title, cr_season)
+        except Exception as exc:
+            logger.debug("Failed to clear unmapped %s: %s", series_title, exc)
 
     async def _process_series(
         self,
@@ -274,6 +366,14 @@ class CrunchyrollPreviewRunner:
                 seen_ids.add(r["id"])
 
         if not search_results:
+            await self._record_unmapped(
+                user_id,
+                series_title,
+                cr_season,
+                cr_episode,
+                "no_anilist_results",
+                "AniList returned no entries for this title",
+            )
             return False
 
         cache_key = series_title.lower()
@@ -283,14 +383,33 @@ class CrunchyrollPreviewRunner:
             )
         season_structure = self._season_structure_cache[cache_key]
 
+        cr_season_title = self._episode_data_cache.get(
+            (series_title, cr_season), {}
+        ).get("season_title", "")
         matched_entry, actual_season, actual_episode = (
             self._matcher.determine_correct_entry_and_episode(
-                series_title, cr_season, cr_episode, season_structure
+                series_title,
+                cr_season,
+                cr_episode,
+                season_structure,
+                cr_season_title=cr_season_title,
             )
         )
 
         if not matched_entry:
+            known = ", ".join(str(sn) for sn in sorted(season_structure))
+            await self._record_unmapped(
+                user_id,
+                series_title,
+                cr_season,
+                cr_episode,
+                "unknown_season",
+                f"No AniList entry for season {cr_season}"
+                + (f" — the season map covers {known}" if known else ""),
+            )
             return False
+
+        await self._clear_unmapped(user_id, series_title, cr_season)
 
         anilist_id = matched_entry["id"]
         anilist_title = get_primary_title(matched_entry)
@@ -335,6 +454,7 @@ class CrunchyrollPreviewRunner:
                 "user_id": user_id,
                 "run_id": self._run_id,
                 "cr_title": series_title,
+                "cr_season": cr_season,
                 "anilist_id": anilist_id,
                 "anilist_title": anilist_title,
                 "confidence": round(confidence, 4),
@@ -435,6 +555,7 @@ class CrunchyrollPreviewRunner:
                 "user_id": user_id,
                 "run_id": self._run_id,
                 "cr_title": series_title,
+                "cr_season": 0,
                 "anilist_id": anilist_id,
                 "anilist_title": anilist_title,
                 "confidence": round(best_similarity, 4),

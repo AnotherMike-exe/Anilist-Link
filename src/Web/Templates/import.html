@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}Anilist-Link: Import{% endblock %}
+
+{% block content %}
+<h1>Import</h1>
+<p class="text-muted hint" style="max-width:70ch">
+  Media you fetched yourself — anything Sonarr or Radarr couldn't find a release for —
+  goes here. Drop a folder (or a single file) into the import folder, review the AniList
+  match below, then import it: the files are renamed and filed exactly as a restructure
+  would place them, and Sonarr/Radarr is told where they landed so it stops showing the
+  episodes as missing.
+</p>
+
+{% if not import_root %}
+<div class="alert alert-warning">
+  <strong>No import folder configured.</strong>
+  Set <em>Import folder</em> under <a href="/settings">Settings → Naming Templates &amp; Restructuring</a>,
+  then come back here.
+</div>
+{% else %}
+<div class="card">
+  <h2>Import folder</h2>
+  <p class="text-muted" style="font-size:0.85rem"><code>{{ import_root }}</code></p>
+  <button class="btn btn-primary" id="scanBtn" onclick="scanImport()">Scan folder</button>
+  <span id="scanStatus" style="margin-left:0.75rem;font-size:0.9rem;color:var(--text-muted)"></span>
+</div>
+
+<div id="results" class="card hidden">
+  <h2>Ready to review</h2>
+  <p class="text-muted hint">
+    Check each match before importing — this is where a wrong sub-season gets corrected,
+    while it's still just a suggestion. Use Preview to see exactly where the files would go.
+  </p>
+  <table class="data-table" id="importTable">
+    <thead>
+      <tr>
+        <th>Dropped item</th>
+        <th>Files</th>
+        <th>Matched to</th>
+        <th>Confidence</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="importBody"></tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="toast-container" id="toastContainer"></div>
+<style>
+  .toast-container { position: fixed; top: 1rem; right: 1rem; z-index: 9999; display: flex; flex-direction: column; gap: 0.5rem; }
+  .toast { padding: 0.75rem 1.25rem; border-radius: 6px; font-size: 0.9rem; box-shadow: 0 2px 8px rgba(0,0,0,0.15); max-width: 420px; white-space: pre-wrap; }
+  .toast-success { background: #2e7d32; color: #fff; }
+  .toast-error { background: #c62828; color: #fff; }
+</style>
+
+<script>
+(function() {
+  'use strict';
+
+  function toast(msg, type) {
+    var c = document.getElementById('toastContainer');
+    var t = document.createElement('div');
+    t.className = 'toast toast-' + (type || 'success');
+    t.textContent = msg;
+    c.appendChild(t);
+    setTimeout(function() { t.remove(); }, 6000);
+  }
+
+  function esc(str) {
+    return String(str == null ? '' : str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  window.scanImport = function() {
+    var btn = document.getElementById('scanBtn');
+    var status = document.getElementById('scanStatus');
+    btn.disabled = true;
+    status.textContent = 'Scanning…';
+    fetch('/api/import/folder/scan')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        btn.disabled = false;
+        if (!data.ok) { status.textContent = ''; toast(data.error || 'Scan failed', 'error'); return; }
+        var rows = data.entries || [];
+        status.textContent = rows.length
+          ? rows.length + ' item' + (rows.length === 1 ? '' : 's') + ' found'
+          : 'Nothing to import — the folder has no media in it.';
+        render(rows);
+      })
+      .catch(function(e) {
+        btn.disabled = false;
+        status.textContent = '';
+        toast('Scan failed: ' + e.message, 'error');
+      });
+  };
+
+  function render(rows) {
+    var body = document.getElementById('importBody');
+    var wrap = document.getElementById('results');
+    body.innerHTML = '';
+    wrap.classList.toggle('hidden', !rows.length);
+    rows.forEach(function(row, i) {
+      var tr = document.createElement('tr');
+      tr.id = 'imp-' + i;
+      var matched = row.anilist_id
+        ? '<a href="https://anilist.co/anime/' + row.anilist_id + '" target="_blank" rel="noopener">' +
+            esc(row.anilist_title) + '</a>'
+        : '<span style="color:var(--text-muted)">No match — set one below</span>';
+      var conf = row.confidence
+        ? row.confidence + '%'
+        : '<span style="color:var(--text-muted)">&mdash;</span>';
+      tr.innerHTML =
+        '<td>' + esc(row.name) + (row.is_dir ? '' : ' <span style="color:var(--text-muted);font-size:0.8rem">(file)</span>') + '</td>' +
+        '<td>' + row.media_count + '</td>' +
+        '<td>' + matched +
+          '<div style="margin-top:0.25rem"><input type="number" class="form-control" style="width:130px;font-size:0.8rem" ' +
+          'placeholder="AniList ID" value="' + (row.anilist_id || '') + '" id="aid-' + i + '"></div></td>' +
+        '<td>' + conf + '</td>' +
+        '<td style="white-space:nowrap">' +
+          '<button class="btn btn-secondary btn-xs" onclick="previewRow(' + i + ')">Preview</button> ' +
+          '<button class="btn btn-primary btn-xs" onclick="importRow(' + i + ')">Import</button>' +
+        '</td>';
+      tr.dataset.path = row.path;
+      body.appendChild(tr);
+    });
+  }
+
+  function rowInfo(i) {
+    var tr = document.getElementById('imp-' + i);
+    var aid = parseInt(document.getElementById('aid-' + i).value, 10);
+    return { tr: tr, path: tr.dataset.path, anilistId: aid };
+  }
+
+  window.previewRow = function(i) {
+    var info = rowInfo(i);
+    if (!info.anilistId) { toast('Set an AniList ID for this item first.', 'error'); return; }
+    fetch('/api/import/folder/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: info.path, anilist_id: info.anilistId })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (!d.ok) { toast(d.error || 'Preview failed', 'error'); return; }
+        var lines = ['Would file ' + d.media_count + ' file(s) as “' + d.anilist_title + '”',
+                     'into: ' + (d.target_folder || '(unchanged)')];
+        (d.moves || []).slice(0, 5).forEach(function(m) { lines.push('  → ' + m.to); });
+        if ((d.moves || []).length > 5) lines.push('  …and ' + (d.moves.length - 5) + ' more');
+        (d.warnings || []).forEach(function(w) { lines.push('! ' + w); });
+        toast(lines.join('\n'), d.ready ? 'success' : 'error');
+      })
+      .catch(function(e) { toast('Preview failed: ' + e.message, 'error'); });
+  };
+
+  window.importRow = function(i) {
+    var info = rowInfo(i);
+    if (!info.anilistId) { toast('Set an AniList ID for this item first.', 'error'); return; }
+    if (!confirm('Import this item into your library?\n\nFiles will be moved and renamed, and Sonarr/Radarr will be told where they went.')) return;
+    fetch('/api/import/folder/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: info.path, anilist_id: info.anilistId })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (!d.ok) { toast(d.error || 'Import failed', 'error'); return; }
+        var arr = d.arr || {};
+        var note = arr.service
+          ? (arr.error ? ' — ' + arr.service + ' notify failed: ' + arr.error
+                       : ' — ' + arr.service + ' rescanned')
+          : ' — not linked to Sonarr/Radarr';
+        toast('Imported ' + d.moved + ' file(s)' + note, d.errors ? 'error' : 'success');
+        if (info.tr) info.tr.style.opacity = '0.45';
+      })
+      .catch(function(e) { toast('Import failed: ' + e.message, 'error'); });
+  };
+})();
+</script>
+{% endblock %}

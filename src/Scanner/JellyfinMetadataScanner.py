@@ -13,7 +13,6 @@ from src.Clients.AnilistClient import AniListClient
 from src.Clients.JellyfinClient import JellyfinClient, JellyfinSeason
 from src.Clients.TVMazeClient import TVMazeClient
 from src.Database.Connection import DatabaseManager
-from src.Matching.Normalizer import clean_title_for_search
 from src.Matching.TitleMatcher import TitleMatcher, get_primary_title
 from src.Scanner.MetadataScanner import (
     ScanItemDetail,
@@ -343,9 +342,11 @@ class JellyfinMetadataScanner:
                 logger.debug("Could not check tvshow.nfo for orphan '%s'", jf_name)
                 continue
 
-            search_title = clean_title_for_search(jf_name)
             try:
-                candidates = await self._anilist.search_anime(search_title, per_page=15)
+                (
+                    candidates,
+                    search_title,
+                ) = await self._anilist.search_anime_with_variants(jf_name, per_page=15)
             except Exception:
                 logger.exception("AniList search failed for orphan '%s'", jf_name)
                 continue
@@ -470,6 +471,20 @@ class JellyfinMetadataScanner:
             len(shows),
         )
         for show in shows:
+            # Same halt as the Plex scanner: without AniList there is
+            # nothing to match against, so stop rather than mark every
+            # remaining item as unmatched.
+            if self._anilist.health.is_down:
+                logger.warning(
+                    "Jellyfin scan halted — AniList API unavailable (%s)",
+                    self._anilist.health.reason,
+                )
+                results.errors.append(
+                    "Scan halted — AniList API is unavailable. "
+                    "It will resume once AniList is back online."
+                )
+                return
+
             folder_name = _derive_folder_name(show)
             # Skip any item without a real filesystem path — these are virtual
             # Jellyfin containers (e.g. "Season Unknown", auto-generated season
@@ -650,8 +665,9 @@ class JellyfinMetadataScanner:
                 return
 
             # 4. Search AniList and match
-            search_title = clean_title_for_search(folder_name or title)
-            candidates = await self._anilist.search_anime(search_title, per_page=15)
+            candidates, search_title = await self._anilist.search_anime_with_variants(
+                folder_name or title, per_page=15
+            )
 
             if not candidates:
                 logger.warning(

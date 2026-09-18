@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import httpx
 
 from src.Clients.AnilistClient import AniListClient
+from src.Clients.AnilistHealth import AniListUnavailableError
 from src.Database.Connection import DatabaseManager
 from src.Web.ActivityTracker import ActivityTracker
 
@@ -106,6 +107,13 @@ async def watchlist_refresh_task(
         )
         return
 
+    if anilist_client.health.is_down:
+        logger.debug(
+            "Watchlist refresh skipped — AniList API is down (%s)",
+            anilist_client.health.reason,
+        )
+        return
+
     users = await db.get_users_by_service("anilist")
     if not users:
         logger.debug("Watchlist refresh skipped — no AniList accounts linked")
@@ -116,6 +124,8 @@ async def watchlist_refresh_task(
     async def _safe_refresh(user: dict) -> None:
         try:
             await _refresh_user(anilist_client, db, user)
+        except AniListUnavailableError as exc:
+            logger.warning("Watchlist refresh halted — %s", exc)
         except httpx.HTTPStatusError as exc:
             logger.error(
                 "Watchlist refresh failed for user %s — HTTP %d: %s",

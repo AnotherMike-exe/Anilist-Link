@@ -200,6 +200,8 @@ Move to `/docs` when:
 
 ### Primary Models/Components
 - **AniList Client**: GraphQL client with OAuth2 flow, rate limiting (90 req/min), public queries, and authenticated mutations [implemented]
+- **AniList Health / Circuit Breaker**: Shared availability tracker (`src/Clients/AnilistHealth.py`) — detects AniList's "API temporarily disabled" 403s, reduced rate limits, sustained 429s and persistent 5xx; fails calls fast while down, halts scheduled jobs and per-item scan/sync loops, and drives the dashboard status banner [implemented]
+- **AniList Health Monitor**: Background loop (`src/Sync/AnilistHealthMonitor.py`) that probes for recovery once an hour (immediately on restart), persists outage state to `app_settings` so downtime survives restarts, and posts a recovery notification [implemented]
 - **Plex Client**: Library enumeration, metadata writing, per-user watch tracking via Plex.tv API [implemented]
 - **Jellyfin Client**: Library access, metadata writing, watch status tracking via open API [implemented]
 - **Crunchyroll Client**: Reverse-engineered auth + watch history retrieval with session persistence [implemented]
@@ -209,7 +211,9 @@ Move to `/docs` when:
 - **Metadata Scanner**: Orchestrates scan → match → cache → apply pipeline across Plex libraries [implemented]
 - **Jellyfin Metadata Scanner**: Parallel scanner for Jellyfin libraries [implemented]
 - **Series Group Builder**: BFS traversal of AniList SEQUEL/PREQUEL graph to build series groups [implemented]
-- **Library Restructurer**: Analyzes and reorganizes anime files into Structure A [implemented]
+- **Library Restructurer**: Analyzes and reorganizes anime files into Structure A; nests lone franchise entries (e.g. a movie) under their series-group ROOT folder, resolving the root via the series group or a PREQUEL-chain walk [implemented]
+- **Smart Move (Fix Location)**: Per-item filesystem relocation for a library item not tracked in Sonarr/Radarr — one-item preview → execute via the restructurer, reusing franchise-root nesting, NFO writing, and orphan cleanup (`src/Web/Routes/SmartMove.py`) [implemented]
+- **Arr Post-Processor franchise nesting**: Sonarr/Radarr "Move to Library" nests movies under the franchise root (series group or PREQUEL walk), disambiguates a movie folder from a same-named TV season, backfills the root's year, writes the group NFO, and prunes the orphaned source folder [implemented]
 - **Watch Syncer**: Crunchyroll→AniList watch sync with status transitions (PLANNING → CURRENT → COMPLETED) [implemented]
 - **Crunchyroll Preview Runner**: Preview/approve/undo pipeline for CR sync [implemented]
 - **Download Manager**: Orchestrates AniList→Sonarr/Radarr add requests [implemented]
@@ -236,6 +240,8 @@ See `ARCHITECTURE.md` for detailed per-pillar architecture.
 ### Media Mapping Model
 - **Series Group**: Collection of AniList entries linked by SEQUEL/PREQUEL relations, sorted chronologically. Represents one logical "show."
 - **Season Mapping**: Each entry in a series group maps to a Plex season, using the entry's AniList title as the season display name.
+- **Season vs Cour**: A Roman numeral or `Nth Season` in an AniList title names the *season*; a bare `Part N` names a *cour within* that season. `parse_season_and_cour()` (`src/Matching/TitleMatcher.py`) is the single source of truth, used by both the CR season map and the restructurer. Crunchyroll numbers seasons the same way, so cours must share their parent's season number — numbering each cour separately mis-maps every later season. Episode numbers run continuously across a season's cours.
+- **CR Season Identity**: Crunchyroll's season *number* is not AniList's — it counts movies and separately-published arcs. The season *title* is the reliable key and takes precedence; see `season_from_cr_season_title()`.
 - **Structure Adaptation**: Scanner auto-detects three Plex file structures (split folders, multi-season, absolute numbering) and maps accordingly. See `ARCHITECTURE.md` Section 8 for details.
 
 ---
@@ -356,7 +362,7 @@ Application-specific variables:
 ## Database
 
 ### Schema Overview (v1 — consolidated 1.0 baseline)
-Current tables (29):
+Current tables (30):
 - `media_mappings` - Maps media server library items to AniList IDs with confidence scores, match method, and optional series group reference
 - `users` - Linked AniList accounts with OAuth tokens
 - `sync_state` - Per-user, per-item sync tracking (last synced episode, timestamp, status)
@@ -385,12 +391,15 @@ Current tables (29):
 - `sonarr_series_cache` - Cached Sonarr series data (by TVDB ID)
 - `radarr_movie_cache` - Cached Radarr movie data (by TMDB ID)
 - `user_watchlist` - Cached AniList watchlist per linked user
+- `cr_unmapped_episodes` - Crunchyroll history the sync could not place on AniList (unknown season / no results), with per-row resolve or dismiss
 
 **New `app_settings` keys (Rate Your Completed Shows / Glance integration)**: `anilist.score_format`, `anilist.score_format_updated_at`, `app.show_unrated_completed`, `glance.api_key` — no new tables, `user_watchlist.score` already existed.
 
+**New `app_settings` key (AniList availability)**: `anilist.health` — JSON snapshot of the current outage (`down_since`, `reason`, `detail`, `reduced_limit`) so a restart reports true downtime rather than resetting it. No new tables.
+
 ### Migration Strategy
 - All tables and indexes defined in `src/Database/Models.py` (TABLES, INDEXES dicts)
-- v1 creates the complete schema baseline; v2/v3 are incremental `ALTER TABLE` patches (current version: 3)
+- v1 creates the complete schema baseline; v2-v5 are incremental patches (current version: 5)
 - Database auto-creates on first run if not present
 - Migrations run automatically at startup
 
@@ -410,6 +419,8 @@ Current tables (29):
   - `GET /` - Dashboard home page
   - `GET /api/status` - System status and sync statistics
   - `GET /api/progress` - Background task progress (floating widget)
+  - `GET /api/anilist/status` - AniList API availability for the status banner (state, reason, downtime, next probe)
+  - `POST /api/anilist/check-now` - Probe AniList immediately instead of waiting for the hourly timer
   - `GET /api/fs/browse` - File system browser for restructure/onboarding
   - `GET /settings` - GUI configuration page
   - `GET /onboarding` - First-run setup wizard
@@ -431,8 +442,15 @@ Current tables (29):
   - `GET /manual-grab` - Manual release grab
   - `GET /watchlist` - AniList watchlist browser
   - `POST /api/watchlist/rate` - Submit a score for a watchlist entry (AniList + local cache)
+  - `POST /api/library/add-to-arr` - Add an AniList entry to Sonarr/Radarr; returns `needs_disambiguation` (with candidates) when TVDB/TMDB can't be auto-resolved so the UI can show a picker overlay
+  - `GET /api/watchlist/sonarr-lookup`, `GET /api/watchlist/radarr-lookup` - Title search against Sonarr/Radarr for the disambiguation picker
+  - `GET /api/watchlist/resolve-stream` - SSE resolve preview (walks TVDB link → prequel chain → title search)
+  - `POST /api/smart-move/preview`, `POST /api/smart-move/execute` - Filesystem "Fix Location" for a single library item **not** managed by Sonarr/Radarr; reuses the restructurer (franchise-root nesting, NFO, orphan cleanup) to relocate one on-disk folder
   - `GET /glance/rate-completed` - Key-gated iframe page for the Glance "Rate Your Completed Shows" widget
   - `POST /glance/rate-completed/submit` - Key-gated rating submission from the Glance widget
+  - `POST /api/crunchyroll/unmapped/{id}/map` - Write a dropped CR season's progress to a chosen AniList entry (audited in `cr_sync_log`, so undoable)
+  - `POST /api/crunchyroll/unmapped/{id}/dismiss` - Close an unmapped report without touching AniList
+  - `POST /api/crunchyroll/repair/scan` - Compare the latest preview run against sync history and report writes that landed on the wrong entry of a series group
   - `POST /arr-webhook` - Sonarr/Radarr webhook receiver
   - `POST /jellyfin/webhook` - Jellyfin webhook receiver (virtual season cleanup on TaskCompleted)
   - `GET /api/jellyfin/virtual-items` - Inspect virtual seasons (diagnostic)
@@ -463,6 +481,7 @@ Current tables (29):
 - `plex_watch_sync` - Plex watch progress polling [implemented — default disabled]
 - `jellyfin_watch_sync` - Jellyfin watch progress polling [implemented — default disabled]
 - `jellyfin_virtual_cleanup` - Polls Jellyfin scan task state every 60s; runs virtual season cleanup on Running→Idle transition [implemented]
+- `anilist_health_monitor` - asyncio loop (not APScheduler); idle while AniList is healthy, probes for recovery during an outage and persists state transitions [implemented]
 
 ---
 
@@ -688,8 +707,12 @@ alias alstop='docker-compose down'           # Stop Anilist-Link
 
 ### Common Pitfalls
 1. **AniList rate limiting**: Exceeding 90 req/min triggers 429 responses with exponential backoff. Always use the throttled client.
-2. **Crunchyroll API instability**: The reverse-engineered API may break without notice. Check `_resources/Research/` for latest findings.
-3. **Plex multi-user tokens**: Per-user tracking requires obtaining individual tokens via Plex.tv API, not just the server admin token.
+2. **AniList outages**: AniList disables its public API from time to time (403 "temporarily disabled") and sometimes runs with a reduced limit. Never add a retry loop of your own around an AniList call — the client's circuit breaker raises `AniListUnavailableError` immediately while the API is down, and any new batch loop over AniList calls should check `anilist_client.health.is_down` and stop.
+3. **Season maps and cours**: never renumber a franchise's season slots per cour — Crunchyroll's season numbers follow AniList's `Nth Season` labels, and shifting them breaks every later season. `tests/Unit/test_cr_season_mapping.py` pins Mushoku Tensei and Re:Zero together for exactly this reason; a change that fixes one by renumbering breaks the other.
+4. **Crunchyroll season numbers drift from AniList's**: CR's season index counts everything it lists for a franchise, including movies and arcs AniList publishes separately, so the numbers are *not* interchangeable — CR reports 7 seasons for Demon Slayer against AniList's 5 TV entries, making CR season 5 AniList season 4. Prefer the CR **season title**: its arc names line up with AniList's English titles, and `season_from_cr_season_title()` overrides the number when one season matches near-exactly and unambiguously. The 0.95 threshold is deliberate — the scorer floors substring-containment pairs at 0.90, so anything lower would fold a movie arc absent from the TV map (Infinity Castle) onto season 1.
+5. **Crunchyroll episode numbering**: CR reports either per-season or franchise-absolute episode numbers, and the only signal is whether the number exceeds the season's length. That test alone is not enough — an absolute reading that resolves to a season *earlier* than the one CR reported disproves itself and must be rejected. Also: CR history is newest-first and paginated, so a series can straddle a page boundary; group the highest episode per (series, season) at **run** level, never per page, or a later page's lower episode produces a second, lower proposal.
+6. **Crunchyroll API instability**: The reverse-engineered API may break without notice. Check `_resources/Research/` for latest findings.
+7. **Plex multi-user tokens**: Per-user tracking requires obtaining individual tokens via Plex.tv API, not just the server admin token.
 
 ### Technical Debt
 **P2 — File Organization**: ✅ Complete
@@ -720,6 +743,9 @@ alias alstop='docker-compose down'           # Stop Anilist-Link
 - Post-processor: naming templates, series groups, season mappings, file renaming, Sonarr path sync + rescan
 - Webhook auto-registration (schema-based), SSE resolve with live progress, S1 title variants for sequel search
 - Full automation (auto-search on new CURRENT status) partial — DownloadSyncer exists
+- Disambiguation overlay for both Sonarr (TVDB) and Radarr (TMDB) when an entry can't be auto-resolved — user picks the correct match
+- Movie handling: franchise-root nesting, movie-vs-TV-season folder disambiguation, year backfill, group NFO, and orphaned-source cleanup on every arr move
+- Smart Move ("Fix Location") for on-disk library items *arr doesn't manage a file for (e.g. a movie whose file came from elsewhere but shares a Sonarr series with the TV seasons)
 
 **General**:
 - Crunchyroll client needs ongoing maintenance as the unofficial API changes

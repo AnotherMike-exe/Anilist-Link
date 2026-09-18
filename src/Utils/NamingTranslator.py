@@ -170,6 +170,34 @@ async def fetch_relations_and_tvdb(
     return relations, tvdb_id
 
 
+async def resolve_franchise_root_id(
+    anilist_id: int, anilist_client: AniListClient, max_depth: int = 12
+) -> int:
+    """Walk PREQUEL relations back to the franchise base and return its AniList ID.
+
+    Follows PREQUEL edges (backwards in time) to the earliest reachable entry —
+    e.g. from a Demon Slayer movie back to the base TV season.  Returns the
+    input id unchanged when it has no prequels or on error.
+    """
+    current = anilist_id
+    visited: set[int] = {current}
+    for _ in range(max_depth):
+        try:
+            relations, _tvdb = await fetch_relations_and_tvdb(current, anilist_client)
+        except Exception:
+            break
+        prequel_id: int | None = None
+        for rel_type, related_id in relations:
+            if rel_type == "PREQUEL" and related_id not in visited:
+                prequel_id = related_id
+                break
+        if not prequel_id:
+            break
+        visited.add(prequel_id)
+        current = prequel_id
+    return current
+
+
 async def resolve_tvdb_via_prequel_chain(
     anilist_id: int, anilist_client: AniListClient, max_depth: int = 10
 ) -> tuple[int | None, int | None]:

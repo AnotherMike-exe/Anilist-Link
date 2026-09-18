@@ -126,6 +126,77 @@ async def submit_anilist_rating(
     await db.update_watchlist_score(user_row["user_id"], anilist_id, score)
 
 
+async def load_arr_state(
+    db: "DatabaseManager",
+) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
+    """Return (sonarr_info, radarr_info) keyed by AniList ID.
+
+    Two queries for the whole page rather than one per row.  Shared by the
+    watchlist and the library so both report *arr state the same way.
+    """
+    sonarr_info: dict[int, dict[str, Any]] = {}
+    for row in await db.fetch_all(
+        "SELECT anilist_id, sonarr_id, sonarr_season,"
+        " sonarr_monitored, monitor_type"
+        " FROM anilist_sonarr_mapping WHERE in_sonarr=1"
+    ):
+        sonarr_info[row["anilist_id"]] = {
+            "sonarr_id": row["sonarr_id"],
+            "sonarr_season": row["sonarr_season"],
+            "sonarr_monitored": bool(row["sonarr_monitored"]),
+            "monitor_type": row["monitor_type"] or "future",
+        }
+
+    radarr_info: dict[int, dict[str, Any]] = {}
+    for row in await db.fetch_all(
+        "SELECT anilist_id, radarr_id, radarr_monitored, monitor_type"
+        " FROM anilist_radarr_mapping WHERE in_radarr=1"
+    ):
+        radarr_info[row["anilist_id"]] = {
+            "radarr_id": row["radarr_id"],
+            "radarr_monitored": bool(row["radarr_monitored"]),
+            "monitor_type": row["monitor_type"] or "future",
+        }
+
+    return sonarr_info, radarr_info
+
+
+def apply_arr_state(
+    entry: dict[str, Any],
+    anilist_id: int | None,
+    sonarr_info: dict[int, dict[str, Any]],
+    radarr_info: dict[int, dict[str, Any]],
+) -> None:
+    """Set the arr_* fields on *entry* in place.
+
+    Always writes every field, so a caller can rely on them being present
+    whether or not the entry is tracked anywhere.
+    """
+    if anilist_id and anilist_id in sonarr_info:
+        si = sonarr_info[anilist_id]
+        entry["arr_status"] = "monitored" if si["sonarr_monitored"] else "tracked"
+        entry["arr_service"] = "sonarr"
+        entry["sonarr_id"] = si["sonarr_id"]
+        entry["radarr_id"] = None
+        entry["sonarr_season"] = si["sonarr_season"]
+        entry["monitor_type"] = si["monitor_type"]
+    elif anilist_id and anilist_id in radarr_info:
+        ri = radarr_info[anilist_id]
+        entry["arr_status"] = "monitored" if ri["radarr_monitored"] else "tracked"
+        entry["arr_service"] = "radarr"
+        entry["sonarr_id"] = None
+        entry["radarr_id"] = ri["radarr_id"]
+        entry["sonarr_season"] = None
+        entry["monitor_type"] = ri["monitor_type"]
+    else:
+        entry["arr_status"] = "untracked"
+        entry["arr_service"] = ""
+        entry["sonarr_id"] = None
+        entry["radarr_id"] = None
+        entry["sonarr_season"] = None
+        entry["monitor_type"] = "future"
+
+
 async def enrich_watchlist_entries(
     db: "DatabaseManager",
     raw_entries: list[dict[str, Any]],
@@ -151,33 +222,7 @@ async def enrich_watchlist_entries(
     for row in lib_rows:
         path_map.setdefault(row["anilist_id"], row["folder_path"])
 
-    # Sonarr tracking
-    sonarr_info: dict[int, dict] = {}
-    sonarr_rows = await db.fetch_all(
-        "SELECT anilist_id, sonarr_id, sonarr_season,"
-        " sonarr_monitored, monitor_type"
-        " FROM anilist_sonarr_mapping WHERE in_sonarr=1"
-    )
-    for row in sonarr_rows:
-        sonarr_info[row["anilist_id"]] = {
-            "sonarr_id": row["sonarr_id"],
-            "sonarr_season": row["sonarr_season"],
-            "sonarr_monitored": bool(row["sonarr_monitored"]),
-            "monitor_type": row["monitor_type"] or "future",
-        }
-
-    # Radarr tracking
-    radarr_info: dict[int, dict] = {}
-    radarr_rows = await db.fetch_all(
-        "SELECT anilist_id, radarr_id, radarr_monitored, monitor_type"
-        " FROM anilist_radarr_mapping WHERE in_radarr=1"
-    )
-    for row in radarr_rows:
-        radarr_info[row["anilist_id"]] = {
-            "radarr_id": row["radarr_id"],
-            "radarr_monitored": bool(row["radarr_monitored"]),
-            "monitor_type": row["monitor_type"] or "future",
-        }
+    sonarr_info, radarr_info = await load_arr_state(db)
 
     enriched: list[dict[str, Any]] = []
     for entry in raw_entries:
@@ -191,29 +236,7 @@ async def enrich_watchlist_entries(
         e["folder_path"] = path_map.get(aid, "")
 
         # Sonarr / Radarr
-        if aid in sonarr_info:
-            si = sonarr_info[aid]
-            e["arr_status"] = "monitored" if si["sonarr_monitored"] else "tracked"
-            e["arr_service"] = "sonarr"
-            e["sonarr_id"] = si["sonarr_id"]
-            e["radarr_id"] = None
-            e["sonarr_season"] = si["sonarr_season"]
-            e["monitor_type"] = si["monitor_type"]
-        elif aid in radarr_info:
-            ri = radarr_info[aid]
-            e["arr_status"] = "monitored" if ri["radarr_monitored"] else "tracked"
-            e["arr_service"] = "radarr"
-            e["sonarr_id"] = None
-            e["radarr_id"] = ri["radarr_id"]
-            e["sonarr_season"] = None
-            e["monitor_type"] = ri["monitor_type"]
-        else:
-            e["arr_status"] = "untracked"
-            e["arr_service"] = ""
-            e["sonarr_id"] = None
-            e["radarr_id"] = None
-            e["sonarr_season"] = None
-            e["monitor_type"] = ""
+        apply_arr_state(e, aid, sonarr_info, radarr_info)
 
         enriched.append(e)
 

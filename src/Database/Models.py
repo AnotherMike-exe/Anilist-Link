@@ -550,6 +550,23 @@ TABLES: dict[str, str] = {
             cr_sync_preview_id INTEGER
         )
     """,
+    "cr_unmapped_episodes": """
+        CREATE TABLE IF NOT EXISTS cr_unmapped_episodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL DEFAULT '',
+            series_title TEXT NOT NULL DEFAULT '',
+            season_title TEXT NOT NULL DEFAULT '',
+            cr_season INTEGER NOT NULL DEFAULT 0,
+            cr_episode INTEGER NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT '',
+            first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+            resolved_at TEXT,
+            resolved_anilist_id INTEGER,
+            UNIQUE(user_id, series_title, cr_season)
+        )
+    """,
     "watch_sync_log": """
         CREATE TABLE IF NOT EXISTS watch_sync_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -677,13 +694,20 @@ TABLES: dict[str, str] = {
             UNIQUE(user_id, anilist_id)
         )
     """,
+    # A Sonarr season can hold more than one AniList entry: split cours (e.g.
+    # Mushoku Tensei S2 Part 1 + Part 2) are two AniList entries inside a single
+    # Sonarr season.  The episode range says which part of the season an entry
+    # covers, in the season's own episode numbering.  episode_end NULL means
+    # "to the end of the season", which is the whole-season 1:1 case.
     "anilist_sonarr_season_mapping": """
         CREATE TABLE IF NOT EXISTS anilist_sonarr_season_mapping (
             sonarr_id     INTEGER NOT NULL,
             season_number INTEGER NOT NULL,
             anilist_id    INTEGER NOT NULL,
+            episode_start INTEGER NOT NULL DEFAULT 1,
+            episode_end   INTEGER,
             created_at    TEXT DEFAULT (datetime('now')),
-            PRIMARY KEY (sonarr_id, season_number)
+            PRIMARY KEY (sonarr_id, season_number, episode_start)
         )
     """,
     "anilist_arr_skip": """
@@ -727,6 +751,8 @@ INDEXES: list[str] = [
     # cr_sync
     "CREATE INDEX IF NOT EXISTS idx_cr_sync_preview_run" " ON cr_sync_preview(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_cr_sync_log_anilist" " ON cr_sync_log(anilist_id)",
+    "CREATE INDEX IF NOT EXISTS idx_cr_unmapped_open"
+    " ON cr_unmapped_episodes(user_id, resolved_at)",
     "CREATE INDEX IF NOT EXISTS idx_watch_sync_log_anilist"
     " ON watch_sync_log(anilist_id)",
     "CREATE INDEX IF NOT EXISTS idx_watch_sync_log_source" " ON watch_sync_log(source)",
