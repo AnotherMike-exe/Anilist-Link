@@ -67,6 +67,10 @@ class CrunchyrollPreviewRunner:
         self._seen: set[tuple[str, int]] = set()
         # Raw episode list per (series_title, cr_season) for episode detail view
         self._raw_episodes: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        # Highest CR episode seen per (series_title, cr_season) across the whole
+        # run — not per page, which is what made a series straddling a page
+        # boundary get evaluated twice at two different episode numbers.
+        self._series_max: dict[tuple[str, int], int] = {}
 
     # ==================================================================
     # Public entry point
@@ -84,6 +88,7 @@ class CrunchyrollPreviewRunner:
         self._preview_rows.clear()
         self._seen.clear()
         self._raw_episodes.clear()
+        self._series_max.clear()
 
         logger.info(
             "Starting CR preview scan for user %s (run_id=%s)",
@@ -109,6 +114,7 @@ class CrunchyrollPreviewRunner:
             return self._run_id
 
         if self._preview_rows:
+            self._refresh_episode_details()
             await self._db.insert_cr_preview_rows(self._preview_rows)
             logger.info(
                 "Preview run %s written %d rows", self._run_id, len(self._preview_rows)
@@ -171,13 +177,37 @@ class CrunchyrollPreviewRunner:
         skipped = 0
         series_progress = self._group_episodes(episodes)
 
-        for (series_title, cr_season), cr_episode in series_progress.items():
+        for (series_title, cr_season), page_episode in series_progress.items():
             if self._anilist.health.is_down:
                 logger.warning(
                     "Crunchyroll preview halted — AniList API unavailable (%s)",
                     self._anilist.health.reason,
                 )
                 break
+
+            key = (series_title, cr_season)
+            already = self._series_max.get(key)
+            if already is not None and page_episode <= already:
+                # Crunchyroll history is newest-first, so a later page carries
+                # *earlier* episodes of a series that straddles the page
+                # boundary. Evaluating it again at that lower number produced a
+                # second row proposing less progress than the first — Demon
+                # Slayer was offered at episode 7 while its episode list ran to
+                # 11. The highest episode already stands.
+                logger.debug(
+                    "%s season %d already evaluated at episode %d, skipping "
+                    "page episode %d",
+                    series_title,
+                    cr_season,
+                    already,
+                    page_episode,
+                )
+                skipped += 1
+                continue
+
+            cr_episode = max(already or 0, page_episode)
+            self._series_max[key] = cr_episode
+
             try:
                 produced = await self._process_series(
                     series_title, cr_season, cr_episode, user
@@ -189,6 +219,23 @@ class CrunchyrollPreviewRunner:
                 skipped += 1
 
         return skipped
+
+    def _refresh_episode_details(self) -> None:
+        """Re-attach the full episode list to each row once paging is done.
+
+        A row is built while its page is being processed, but ``_raw_episodes``
+        keeps filling as later pages arrive. Without this the episode detail a
+        row carries is whatever had been collected at that moment, which is why
+        a row's episode list and its proposed progress could disagree.
+        """
+        for row in self._preview_rows:
+            key = (row.get("cr_title", ""), row.get("cr_season", 0))
+            raw = self._raw_episodes.get(key)
+            if raw is None:
+                continue
+            row["episodes_json"] = json.dumps(
+                sorted(raw, key=lambda e: (e["cr_season"], e["cr_episode"]))
+            )
 
     def _group_episodes(
         self, episodes: list[CrunchyrollEpisode]
@@ -396,6 +443,7 @@ class CrunchyrollPreviewRunner:
                 "user_id": user_id,
                 "run_id": self._run_id,
                 "cr_title": series_title,
+                "cr_season": cr_season,
                 "anilist_id": anilist_id,
                 "anilist_title": anilist_title,
                 "confidence": round(confidence, 4),
@@ -496,6 +544,7 @@ class CrunchyrollPreviewRunner:
                 "user_id": user_id,
                 "run_id": self._run_id,
                 "cr_title": series_title,
+                "cr_season": 0,
                 "anilist_id": anilist_id,
                 "anilist_title": anilist_title,
                 "confidence": round(best_similarity, 4),

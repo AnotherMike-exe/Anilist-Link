@@ -708,8 +708,9 @@ alias alstop='docker-compose down'           # Stop Anilist-Link
 1. **AniList rate limiting**: Exceeding 90 req/min triggers 429 responses with exponential backoff. Always use the throttled client.
 2. **AniList outages**: AniList disables its public API from time to time (403 "temporarily disabled") and sometimes runs with a reduced limit. Never add a retry loop of your own around an AniList call — the client's circuit breaker raises `AniListUnavailableError` immediately while the API is down, and any new batch loop over AniList calls should check `anilist_client.health.is_down` and stop.
 3. **Season maps and cours**: never renumber a franchise's season slots per cour — Crunchyroll's season numbers follow AniList's `Nth Season` labels, and shifting them breaks every later season. `tests/Unit/test_cr_season_mapping.py` pins Mushoku Tensei and Re:Zero together for exactly this reason; a change that fixes one by renumbering breaks the other.
-4. **Crunchyroll API instability**: The reverse-engineered API may break without notice. Check `_resources/Research/` for latest findings.
-5. **Plex multi-user tokens**: Per-user tracking requires obtaining individual tokens via Plex.tv API, not just the server admin token.
+4. **Crunchyroll episode numbering**: CR reports either per-season or franchise-absolute episode numbers, and the only signal is whether the number exceeds the season's length. That test alone is not enough — an absolute reading that resolves to a season *earlier* than the one CR reported disproves itself and must be rejected (Demon Slayer season 5 episode 11 resolved to season 1 episode 11 this way). Also: CR history is newest-first and paginated, so a series can straddle a page boundary; group the highest episode per (series, season) at **run** level, never per page, or a later page's lower episode produces a second, lower proposal.
+5. **Crunchyroll API instability**: The reverse-engineered API may break without notice. Check `_resources/Research/` for latest findings.
+6. **Plex multi-user tokens**: Per-user tracking requires obtaining individual tokens via Plex.tv API, not just the server admin token.
 
 ### Technical Debt
 **P2 — File Organization**: ✅ Complete

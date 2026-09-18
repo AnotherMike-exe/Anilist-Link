@@ -68,6 +68,10 @@ class WatchSyncer:
         self._episode_data_cache: dict[tuple[str, int], dict[str, Any]] = {}
         # Key: (user_id, anime_id), Value: highest_progress_processed
         self._processed: dict[tuple[str, int], int] = {}
+        # Highest CR episode seen per (series_title, cr_season) across the whole
+        # run — not per page, so a series straddling a page boundary is not
+        # re-evaluated at the lower episode a later page carries.
+        self._series_max: dict[tuple[str, int], int] = {}
         # Unique ID for this sync run — used when writing cr_sync_log entries
         self._sync_run_id: str = uuid.uuid4().hex
 
@@ -206,13 +210,34 @@ class WatchSyncer:
 
         series_progress = self._group_episodes_by_series_and_season(episodes)
 
-        for (series_title, cr_season), latest_episode in series_progress.items():
+        for (series_title, cr_season), page_episode in series_progress.items():
             if self._anilist.health.is_down:
                 logger.warning(
                     "Crunchyroll sync halted — AniList API unavailable (%s)",
                     self._anilist.health.reason,
                 )
                 break
+
+            key = (series_title, cr_season)
+            already = self._series_max.get(key)
+            if already is not None and page_episode <= already:
+                # CR history is newest-first, so a later page carries earlier
+                # episodes of a series that spans the page boundary. The highest
+                # episode already stands.
+                logger.debug(
+                    "%s season %d already processed at episode %d, skipping "
+                    "page episode %d",
+                    series_title,
+                    cr_season,
+                    already,
+                    page_episode,
+                )
+                page_stats["skipped_episodes"] += len(users)
+                continue
+
+            latest_episode = max(already or 0, page_episode)
+            self._series_max[key] = latest_episode
+
             try:
                 for user in users:
                     success = await self._process_series_entry(
@@ -1087,6 +1112,7 @@ class WatchSyncer:
         self._season_structure_cache.clear()
         self._episode_data_cache.clear()
         self._processed.clear()
+        self._series_max.clear()
 
     def _report_results(self) -> None:
         """Log sync results summary."""

@@ -620,34 +620,46 @@ class TitleMatcher:
                 cours = _season_cours(season_structure[sn])
                 season_eps = _season_episode_total(cours)
 
-                if season_eps:
-                    if cr_episode <= cumulative + season_eps:
-                        episode_in_season = cr_episode - cumulative
-                        if episode_in_season > 0:
-                            entry, episode = _resolve_within_cours(
-                                cours, episode_in_season
-                            )
-                            logger.info(
-                                "Episode %d (absolute) maps to S%dE%d",
-                                cr_episode,
-                                sn,
-                                episode,
-                            )
-                            return entry, sn, episode
-                    cumulative += season_eps
-                else:
-                    # Unknown total — allocate the remainder to this season.
-                    episode_in_season = cr_episode - cumulative
-                    if episode_in_season > 0:
-                        entry, episode = _resolve_within_cours(cours, episode_in_season)
-                        logger.info(
-                            "Episode %d (absolute) maps to S%dE%d "
-                            "(unknown season size)",
-                            cr_episode,
-                            sn,
-                            episode,
-                        )
-                        return entry, sn, episode
+                episode_in_season = cr_episode - cumulative
+                if season_eps is not None:
+                    # This season is fully known — skip past it if the episode
+                    # lands beyond its end.
+                    if cr_episode > cumulative + season_eps:
+                        cumulative += season_eps
+                        continue
+                    if episode_in_season <= 0:
+                        cumulative += season_eps
+                        continue
+                elif episode_in_season <= 0:
+                    continue
+
+                # Sanity-check the absolute hypothesis before trusting it.
+                # Crunchyroll would not file an episode under season N and mean
+                # an episode of an *earlier* season, so a result that resolves
+                # before cr_season disproves the hypothesis rather than
+                # confirming it. Demon Slayer season 5 episode 11 (against an
+                # 8-episode season 5) resolved to season 1 episode 11 this way
+                # and proposed writing progress to the wrong entry.
+                if cr_season > sn:
+                    logger.debug(
+                        "Rejecting absolute reading of episode %d: it resolves "
+                        "to S%dE%d, earlier than the reported season %d",
+                        cr_episode,
+                        sn,
+                        episode_in_season,
+                        cr_season,
+                    )
+                    break
+
+                entry, episode = _resolve_within_cours(cours, episode_in_season)
+                logger.info(
+                    "Episode %d (absolute) maps to S%dE%d%s",
+                    cr_episode,
+                    sn,
+                    episode,
+                    " (unknown season size)" if season_eps is None else "",
+                )
+                return entry, sn, episode
 
         # Direct season lookup — resolve the episode against the season's cours
         if cr_season in season_structure:
