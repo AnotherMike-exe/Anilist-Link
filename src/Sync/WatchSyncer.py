@@ -281,6 +281,12 @@ class WatchSyncer:
                     or ep.episode_number > series_season_progress[key]
                 ):
                     series_season_progress[key] = ep.episode_number
+                # The season title identifies the season far more reliably than
+                # CR's season number — see season_from_cr_season_title.
+                if ep.season_title:
+                    self._episode_data_cache.setdefault(key, {})[
+                        "season_title"
+                    ] = ep.season_title
 
         self._sync_results["total_episodes"] = len(episodes)
         return series_season_progress
@@ -360,9 +366,16 @@ class WatchSyncer:
                 self._season_structure_cache[cache_key] = season_structure
 
             # Determine correct entry + episode
+            cr_season_title = self._episode_data_cache.get(
+                (series_title, cr_season), {}
+            ).get("season_title", "")
             matched_entry, actual_season, actual_episode = (
                 self._matcher.determine_correct_entry_and_episode(
-                    series_title, cr_season, cr_episode, season_structure
+                    series_title,
+                    cr_season,
+                    cr_episode,
+                    season_structure,
+                    cr_season_title=cr_season_title,
                 )
             )
 

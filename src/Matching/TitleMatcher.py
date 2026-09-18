@@ -210,10 +210,16 @@ class TitleMatcher:
     # Title similarity (ported verbatim from AnimeMatcher)
     # ------------------------------------------------------------------
 
+    @staticmethod
     def calculate_title_similarity(
-        self, target_title: str, candidate: dict[str, Any]
+        target_title: str, candidate: dict[str, Any]
     ) -> float:
-        """Calculate similarity score between *target_title* and a candidate entry."""
+        """Calculate similarity score between *target_title* and a candidate entry.
+
+        Static so the season-mapping helpers can score titles without an
+        instance; instance calls (``self._matcher.calculate_title_similarity``)
+        are unaffected.
+        """
         target_normalized = normalize_title(target_title)
         target_base = extract_base_title(target_normalized)
         target_no_space = target_normalized.replace(" ", "")
@@ -574,8 +580,13 @@ class TitleMatcher:
         cr_season: int,
         cr_episode: int,
         season_structure: dict[int, dict[str, Any]],
+        cr_season_title: str = "",
     ) -> tuple[dict[str, Any] | None, int, int]:
         """Map a CR season+episode to the correct AniList entry.
+
+        When ``cr_season_title`` identifies a season unambiguously it overrides
+        ``cr_season``, because CR's season numbers count movies and arcs that
+        AniList lists separately and so drift out of step with it.
 
         Detects absolute-episode numbering (where CR reports a running count
         across seasons rather than per-season) and converts to per-season.
@@ -586,6 +597,17 @@ class TitleMatcher:
         """
         if not season_structure:
             return None, 0, 0
+
+        titled_season = season_from_cr_season_title(cr_season_title, season_structure)
+        if titled_season is not None and titled_season != cr_season:
+            logger.info(
+                "%s: Crunchyroll season %d is AniList season %d by title (%r)",
+                series_title,
+                cr_season,
+                titled_season,
+                cr_season_title,
+            )
+            cr_season = titled_season
 
         sorted_seasons = sorted(season_structure.keys())
 
@@ -832,6 +854,66 @@ def parse_season_and_cour(entry: dict[str, Any]) -> tuple[int | None, int]:
                     break
 
     return season, cour
+
+
+# A CR season title must match an AniList title this closely before it is
+# allowed to override CR's own season number. The scorer floors any
+# substring-containment pair at 0.90, so 0.95 means "near-exact on some title of
+# that entry" rather than merely "one title contains the other" — which is what
+# keeps a movie arc absent from the TV map (Demon Slayer's Infinity Castle) from
+# being folded onto season 1.
+_CR_SEASON_TITLE_MIN_SIMILARITY = 0.95
+
+
+def season_from_cr_season_title(
+    cr_season_title: str, season_structure: dict[int, dict[str, Any]]
+) -> int | None:
+    """Identify a season from the season title Crunchyroll reports, if it can.
+
+    Crunchyroll's season *numbers* count everything it lists for a franchise,
+    including movies and arcs AniList publishes as separate entries, so the two
+    numbering schemes drift apart. Demon Slayer is the clearest case: CR reports
+    seasons up to 7 for a franchise AniList models as 5 TV entries, so CR's
+    "season 5" is not AniList's season 5 at all.
+
+    The season *title* has no such problem — CR's arc names line up with AniList's
+    English titles ("… Hashira Training Arc" ↔ ``Kimetsu no Yaiba: Hashira
+    Geiko-hen``) — so when one season matches near-exactly and unambiguously, it
+    is a better answer than the number.
+
+    Returns the season number, or ``None`` when the title is missing, generic, or
+    matches nothing clearly enough to act on. Callers keep CR's own number then.
+    """
+    if not cr_season_title or not cr_season_title.strip():
+        return None
+
+    best_season: int | None = None
+    best_score = 0.0
+    runner_up = 0.0
+
+    for season, season_data in season_structure.items():
+        season_best = 0.0
+        for cour in _season_cours(season_data):
+            entry = cour.get("entry")
+            if not entry:
+                continue
+            season_best = max(
+                season_best,
+                TitleMatcher.calculate_title_similarity(cr_season_title, entry),
+            )
+        if season_best > best_score:
+            runner_up = best_score
+            best_score = season_best
+            best_season = season
+        elif season_best > runner_up:
+            runner_up = season_best
+
+    if best_season is None or best_score < _CR_SEASON_TITLE_MIN_SIMILARITY:
+        return None
+    if best_score <= runner_up:
+        # Two seasons match equally well — the title does not discriminate.
+        return None
+    return best_season
 
 
 def _season_cours(season_data: dict[str, Any]) -> list[dict[str, Any]]:

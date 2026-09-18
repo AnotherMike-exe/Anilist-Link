@@ -271,6 +271,10 @@ class CrunchyrollPreviewRunner:
                 key = (ep.series_title, ep.season)
                 if key not in progress or ep.episode_number > progress[key]:
                     progress[key] = ep.episode_number
+                if ep.season_title:
+                    self._episode_data_cache.setdefault(key, {})[
+                        "season_title"
+                    ] = ep.season_title
                 if key not in self._raw_episodes:
                     self._raw_episodes[key] = []
                 known = {e["cr_episode"] for e in self._raw_episodes[key]}
@@ -379,9 +383,16 @@ class CrunchyrollPreviewRunner:
             )
         season_structure = self._season_structure_cache[cache_key]
 
+        cr_season_title = self._episode_data_cache.get(
+            (series_title, cr_season), {}
+        ).get("season_title", "")
         matched_entry, actual_season, actual_episode = (
             self._matcher.determine_correct_entry_and_episode(
-                series_title, cr_season, cr_episode, season_structure
+                series_title,
+                cr_season,
+                cr_episode,
+                season_structure,
+                cr_season_title=cr_season_title,
             )
         )
 
