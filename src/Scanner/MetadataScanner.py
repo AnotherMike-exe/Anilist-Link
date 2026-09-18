@@ -12,7 +12,6 @@ from typing import Any
 from src.Clients.AnilistClient import AniListClient
 from src.Clients.PlexClient import PlexClient
 from src.Database.Connection import DatabaseManager
-from src.Matching.Normalizer import clean_title_for_search
 from src.Matching.TitleMatcher import TitleMatcher, get_primary_title
 from src.Scanner.SeriesGroupBuilder import SeriesGroupBuilder
 from src.Utils.Config import AppConfig
@@ -423,8 +422,9 @@ class MetadataScanner:
                 return
 
             # 4. Search AniList and match — prefer folder name over Plex title
-            search_title = clean_title_for_search(folder_name or title)
-            candidates = await self._anilist.search_anime(search_title, per_page=15)
+            candidates, search_title = await self._anilist.search_anime_with_variants(
+                folder_name or title, per_page=15
+            )
 
             if not candidates:
                 logger.warning("  [no results] %s", title)

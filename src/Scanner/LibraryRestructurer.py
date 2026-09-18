@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
 from src.Database.Connection import DatabaseManager
+from src.Matching.TitleMatcher import parse_season_and_cour
 from src.Scanner.SeriesGroupBuilder import SeriesGroupBuilder
 from src.Utils.NamingTemplate import (
     DEFAULT_FILE_TEMPLATE,
@@ -491,48 +492,114 @@ def _cumulative_episodes_before(
 _NON_TV_FORMATS: frozenset[str] = frozenset({"MOVIE", "OVA", "SPECIAL"})
 
 
-def _build_tv_season_map(
+def _entry_title_obj(entry: dict) -> dict:
+    """Shape a series_group_entries row for :func:`_parse_season_and_cour`."""
+    return {
+        "title": {
+            "romaji": entry.get("title_romaji") or entry.get("display_title") or "",
+            "english": entry.get("title_english") or "",
+        }
+    }
+
+
+def _build_tv_season_cour_map(
     full_group_entries: list[dict],
-) -> dict[int, dict]:
-    """Map 1-based TV season number to its series group entry.
+) -> dict[int, list[dict]]:
+    """Map 1-based TV season number to the ordered cours making up that season.
 
     Skips MOVIE/OVA/SPECIAL entries so that on-disk season directory numbers
-    (Season 1/, Season 2/, …) map correctly to AniList entries even when
-    movies appear between seasons in the relation graph.
+    (Season 1/, Season 2/, …) map correctly to AniList entries even when movies
+    appear between seasons in the relation graph.
 
-    Example — JJK series group has season_order 1=S1, 2=JJK0(movie), 3=S2, 4=S3.
-    tv_season_map → {1: S1-entry, 2: S2-entry, 3: S3-entry}
+    A split season's cours share one season number, matching both Crunchyroll's
+    numbering and the episode-range season model the Sonarr side already uses.
+    Mushoku Tensei's five TV entries therefore make three seasons:
+
+        {1: [S1 Part 1, S1 Part 2], 2: [II, II Part 2], 3: [III]}
+
+    Numbering each cour separately put "Mushoku Tensei III" at season 5 and left
+    season 3 pointing at "Mushoku Tensei II", which is how season-3 files ended
+    up named after season 2 and colliding with it.
     """
-    tv_num = 0
-    result: dict[int, dict] = {}
+    buckets: dict[int, dict[int, dict]] = {}
+    implicit_next = 1
+    last_season = 1
+
     for entry in sorted(full_group_entries, key=lambda e: e["season_order"]):
         fmt = (entry.get("format") or "").upper()
         if fmt in _NON_TV_FORMATS:
             continue
-        tv_num += 1
-        result[tv_num] = entry
-    return result
+
+        parsed_season, cour = parse_season_and_cour(_entry_title_obj(entry))
+
+        if parsed_season is None:
+            if cour > 1:
+                season = last_season
+            else:
+                while implicit_next in buckets:
+                    implicit_next += 1
+                season = implicit_next
+                implicit_next += 1
+        else:
+            season = parsed_season
+
+        last_season = season
+        buckets.setdefault(season, {}).setdefault(cour, entry)
+
+    return {
+        season: [buckets[season][c] for c in sorted(buckets[season])]
+        for season in sorted(buckets)
+    }
 
 
-def _cumulative_tv_episodes(
-    before_tv_season: int,
-    tv_season_map: dict[int, dict],
+def _build_tv_season_map(
+    full_group_entries: list[dict],
+) -> dict[int, dict]:
+    """Map 1-based TV season number to the entry representing that season.
+
+    A split season is represented by its first cour. See
+    :func:`_build_tv_season_cour_map` for the season/cour grouping.
+    """
+    return {
+        season: cours[0]
+        for season, cours in _build_tv_season_cour_map(full_group_entries).items()
+    }
+
+
+def _anilist_season_numbers(full_group_entries: list[dict]) -> dict[int, int]:
+    """Map each group entry's anilist_id to its season number.
+
+    TV entries take the cour-collapsed season number; non-TV entries keep their
+    chronological ``season_order`` so they are never routed to Specials.
+    """
+    numbers: dict[int, int] = {}
+    for season, cours in _build_tv_season_cour_map(full_group_entries).items():
+        for cour in cours:
+            numbers[cour["anilist_id"]] = season
+    for entry in full_group_entries:
+        numbers.setdefault(entry["anilist_id"], entry["season_order"])
+    return numbers
+
+
+def _cumulative_season_episodes(
+    before_season: int,
+    season_cour_map: dict[int, list[dict]],
 ) -> int | None:
-    """Sum episode counts for all TV seasons before *before_tv_season*.
+    """Sum episode counts for all seasons before *before_season*.
 
-    Uses the tv_season_map built by ``_build_tv_season_map`` (movies excluded).
-    Returns None if any prior TV season has an unknown episode count or is
-    missing from the map.
+    Counts every cour of each earlier season, so a 12+12 split season
+    contributes 24 rather than 12. Returns None if any cour count is unknown.
     """
     total = 0
-    for n in range(1, before_tv_season):
-        entry = tv_season_map.get(n)
-        if entry is None:
+    for n in range(1, before_season):
+        cours = season_cour_map.get(n)
+        if not cours:
             return None
-        ep_count = entry.get("episodes")
-        if not ep_count:
-            return None
-        total += ep_count
+        for cour in cours:
+            ep_count = cour.get("episodes")
+            if not ep_count:
+                return None
+            total += ep_count
     return total
 
 
@@ -1194,6 +1261,10 @@ class LibraryRestructurer:
             # Remember the group for this anilist_id (used if demoted to standalone)
             standalone_group_id[si.anilist_id] = group_id
 
+            # Cours of a split season share one season number, so a franchise's
+            # third season is Season 3 even when five TV entries precede it.
+            season_numbers = _anilist_season_numbers(entries)
+
             season_order = 1
             tv_season_order = 1
             entry_format = ""
@@ -1204,10 +1275,10 @@ class LibraryRestructurer:
                     season_order = entry["season_order"]
                     entry_format = fmt
                     entry_episodes = entry.get("episodes")
-                    # Use the chronological season_order for ALL formats so that
-                    # OVA/ONA/SPECIAL/MOVIE entries are never routed to S00 /
+                    # Non-TV entries fall back to the chronological season_order
+                    # so OVA/ONA/SPECIAL/MOVIE entries are never routed to S00 /
                     # Specials — they keep their position in the series group.
-                    tv_season_order = season_order
+                    tv_season_order = season_numbers.get(si.anilist_id, season_order)
                     break
 
             group_shows[group_id].append(
@@ -1243,7 +1314,10 @@ class LibraryRestructurer:
             # map correctly even when movies/OVAs sit between TV seasons in
             # the AniList relation graph.
             full_entries = all_group_entries.get(group_id, [])
-            tv_season_map = _build_tv_season_map(full_entries)
+            tv_season_cour_map = _build_tv_season_cour_map(full_entries)
+            tv_season_map = {
+                season: cours[0] for season, cours in tv_season_cour_map.items()
+            }
 
             group_info = await self._db.fetch_one(
                 "SELECT display_title, root_anilist_id FROM series_groups WHERE id=?",
@@ -1478,8 +1552,10 @@ class LibraryRestructurer:
                                 # works even when a season has no local folder).
                                 # Fall back to locally-matched shows only.
                                 prior_eps = (
-                                    _cumulative_tv_episodes(file_season, tv_season_map)
-                                    if tv_season_map
+                                    _cumulative_season_episodes(
+                                        file_season, tv_season_cour_map
+                                    )
+                                    if tv_season_cour_map
                                     else _cumulative_episodes_before(
                                         file_season, shows_in_group
                                     )

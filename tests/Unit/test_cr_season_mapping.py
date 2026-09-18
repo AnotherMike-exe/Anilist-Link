@@ -27,7 +27,9 @@ import pytest
 from src.Matching.Normalizer import extract_base_series_title
 from src.Matching.TitleMatcher import (
     TitleMatcher,
-    _detect_season_from_anilist_entry,
+    _resolve_within_cours,
+    _season_episode_total,
+    parse_season_and_cour,
 )
 
 
@@ -198,42 +200,44 @@ class TestFranchiseGrouping:
 # ----------------------------------------------------------------------
 
 
-class TestSeasonDetection:
-    def test_part_two_of_third_season_is_season_three(self) -> None:
-        """Regression: with "Part N" checked first this returned 2."""
-        assert (
-            _detect_season_from_anilist_entry(
-                _entry(0, "Mushoku Tensei III: Isekai Ittara Honki Dasu Part 2"),
-                "Mushoku Tensei",
-            )
-            == 3
-        )
+class TestSeasonAndCourParsing:
+    """A Roman numeral / "Nth Season" names the season; "Part N" names the cour."""
 
-    def test_roman_numeral_entry_is_its_own_season(self) -> None:
-        assert (
-            _detect_season_from_anilist_entry(
-                _entry(178789, "Mushoku Tensei III: Isekai Ittara Honki Dasu"),
-                "Mushoku Tensei",
-            )
-            == 3
-        )
+    @pytest.mark.parametrize(
+        "romaji, expected",
+        [
+            # No marker at all — the caller places it positionally.
+            ("Mushoku Tensei: Isekai Ittara Honki Dasu", (None, 1)),
+            # A bare "Part 2" is a cour, NOT season 2. Reading it as a season
+            # is what made season 1's second cour occupy the season 2 slot and
+            # pushed the real season 2 out of the map.
+            ("Mushoku Tensei: Isekai Ittara Honki Dasu Part 2", (None, 2)),
+            # Roman numeral = season; the Part is a cour inside it.
+            ("Mushoku Tensei II: Isekai Ittara Honki Dasu", (2, 1)),
+            ("Mushoku Tensei II: Isekai Ittara Honki Dasu Part 2", (2, 2)),
+            ("Mushoku Tensei III: Isekai Ittara Honki Dasu", (3, 1)),
+            # Regression: "Part N" used to win over the Roman numeral, so this
+            # reported season 2.
+            ("Mushoku Tensei III: Isekai Ittara Honki Dasu Part 2", (3, 2)),
+            # Ordinal and explicit forms.
+            ("Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season", (2, 1)),
+            ("Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season Part 2", (2, 2)),
+            ("Kaijuu 8-gou 2nd Season", (2, 1)),
+            ("Shingeki no Kyojin Season 3", (3, 1)),
+            ("Some Show Cour 2", (None, 2)),
+        ],
+    )
+    def test_parse(self, romaji: str, expected: tuple[int | None, int]) -> None:
+        assert parse_season_and_cour(_entry(0, romaji)) == expected
 
-    def test_part_without_roman_numeral_still_detected(self) -> None:
-        assert (
-            _detect_season_from_anilist_entry(
-                _entry(127720, "Mushoku Tensei: Isekai Ittara Honki Dasu Part 2"),
-                "Mushoku Tensei",
-            )
-            == 2
+    def test_english_title_supplies_the_marker(self) -> None:
+        """AniList's romaji may carry no marker while the english does."""
+        entry = _entry(
+            0,
+            "Mushoku Tensei III: Isekai Ittara Honki Dasu",
+            "Mushoku Tensei: Jobless Reincarnation Season 3",
         )
-
-    def test_ordinal_season_still_detected(self) -> None:
-        assert (
-            _detect_season_from_anilist_entry(
-                _entry(0, "Kaijuu 8-gou 2nd Season"), "Kaijuu 8-gou"
-            )
-            == 2
-        )
+        assert parse_season_and_cour(entry) == (3, 1)
 
 
 # ----------------------------------------------------------------------
@@ -348,3 +352,128 @@ class TestUnknownSeasonGuardrail:
         assert TitleMatcher.determine_correct_entry_and_episode(
             REZERO_TITLE, cr_season=9, cr_episode=3, season_structure=structure
         ) == (None, 0, 0)
+
+
+# ----------------------------------------------------------------------
+# Cour model — a season holds its cours, numbered continuously
+# ----------------------------------------------------------------------
+
+
+class TestCourGrouping:
+    def test_mushoku_cours_group_under_their_seasons(self, mushoku_results) -> None:
+        """Three seasons, with the two split seasons holding two cours each."""
+        structure = TitleMatcher().build_season_structure(
+            mushoku_results, MUSHOKU_TITLE
+        )
+        assert sorted(structure) == [1, 2, 3]
+        assert [c["id"] for c in structure[1]["cours"]] == [108465, 127720]
+        assert [c["id"] for c in structure[2]["cours"]] == [146065, 166873]
+        assert [c["id"] for c in structure[3]["cours"]] == [178789]
+
+    def test_rezero_cours_group_under_their_seasons(self, rezero_results) -> None:
+        structure = TitleMatcher().build_season_structure(rezero_results, REZERO_TITLE)
+        assert sorted(structure) == [1, 2, 3, 4]
+        assert [c["id"] for c in structure[2]["cours"]] == [108632, 119661]
+        assert [c["id"] for c in structure[4]["cours"]] == [189046]
+
+    def test_season_total_sums_its_cours(self, mushoku_results) -> None:
+        structure = TitleMatcher().build_season_structure(
+            mushoku_results, MUSHOKU_TITLE
+        )
+        assert structure[1]["episodes"] == 23  # 11 + 12
+        assert structure[2]["episodes"] == 24  # 12 + 12
+
+    def test_airing_season_total_is_unknown(self, mushoku_results) -> None:
+        """A season with a still-airing cour has no usable total."""
+        structure = TitleMatcher().build_season_structure(
+            mushoku_results, MUSHOKU_TITLE
+        )
+        assert structure[3]["episodes"] is None
+
+    def test_first_cour_stays_the_season_representative(self, mushoku_results) -> None:
+        structure = TitleMatcher().build_season_structure(
+            mushoku_results, MUSHOKU_TITLE
+        )
+        assert structure[2]["id"] == 146065
+        assert structure[2]["entry"]["id"] == 146065
+
+
+class TestContinuousEpisodeNumbering:
+    """Crunchyroll numbers episodes continuously across a season's cours."""
+
+    @pytest.mark.parametrize(
+        "cr_season, cr_episode, expected_id, expected_episode",
+        [
+            # Season 2 of Mushoku is 12 + 12; episode 15 is cour 2 episode 3.
+            (2, 3, 146065, 3),
+            (2, 12, 146065, 12),
+            (2, 13, 166873, 1),
+            (2, 15, 166873, 3),
+            (2, 24, 166873, 12),
+            # Season 1 is 11 + 12; episode 20 is cour 2 episode 9.
+            (1, 11, 108465, 11),
+            (1, 12, 127720, 1),
+            (1, 20, 127720, 9),
+        ],
+    )
+    def test_mushoku_cour_boundaries(
+        self, mushoku_results, cr_season, cr_episode, expected_id, expected_episode
+    ) -> None:
+        structure = TitleMatcher().build_season_structure(
+            mushoku_results, MUSHOKU_TITLE
+        )
+        entry, season, episode = TitleMatcher.determine_correct_entry_and_episode(
+            MUSHOKU_TITLE, cr_season, cr_episode, structure
+        )
+        assert entry is not None
+        assert entry["id"] == expected_id
+        assert (season, episode) == (cr_season, expected_episode)
+
+    def test_rezero_season_two_crosses_into_part_two(self, rezero_results) -> None:
+        """Season 2 is 13 + 12; CR episode 20 is Part 2 episode 7."""
+        structure = TitleMatcher().build_season_structure(rezero_results, REZERO_TITLE)
+        entry, season, episode = TitleMatcher.determine_correct_entry_and_episode(
+            REZERO_TITLE, cr_season=2, cr_episode=20, season_structure=structure
+        )
+        assert entry is not None
+        assert entry["id"] == 119661
+        assert (season, episode) == (2, 7)
+
+
+class TestCourHelpers:
+    def test_total_is_none_when_a_cour_is_airing(self) -> None:
+        assert _season_episode_total([{"episodes": 12}, {"episodes": None}]) is None
+
+    def test_total_sums_known_cours(self) -> None:
+        assert _season_episode_total([{"episodes": 11}, {"episodes": 12}]) == 23
+
+    def test_resolve_picks_the_containing_cour(self) -> None:
+        cours = [
+            {"episodes": 12, "entry": {"id": 1}},
+            {"episodes": 12, "entry": {"id": 2}},
+        ]
+        assert _resolve_within_cours(cours, 12) == ({"id": 1}, 12)
+        assert _resolve_within_cours(cours, 13) == ({"id": 2}, 1)
+
+    def test_resolve_allocates_remainder_to_airing_cour(self) -> None:
+        cours = [
+            {"episodes": 12, "entry": {"id": 1}},
+            {"episodes": None, "entry": {"id": 2}},
+        ]
+        assert _resolve_within_cours(cours, 15) == ({"id": 2}, 3)
+
+    def test_resolve_caps_past_the_last_cour(self) -> None:
+        cours = [{"episodes": 12, "entry": {"id": 1}}]
+        assert _resolve_within_cours(cours, 99) == ({"id": 1}, 12)
+
+    def test_legacy_structure_without_cours_still_maps(self) -> None:
+        """Hand-built season structures (no "cours" key) must keep working."""
+        entry = _entry(1, "Show", episodes=12)
+        structure = {
+            1: {"entry": entry, "episodes": 12, "title": "Show", "id": 1},
+        }
+        got, season, episode = TitleMatcher.determine_correct_entry_and_episode(
+            "Show", cr_season=1, cr_episode=5, season_structure=structure
+        )
+        assert got is entry
+        assert (season, episode) == (1, 5)

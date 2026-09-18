@@ -347,8 +347,8 @@ class LibraryScanner:
         broad_query = clean_title_for_search(folder_name)
         if broad_query.strip() and broad_query != specific_query:
             try:
-                candidates = await self._anilist.search_anime(
-                    broad_query, page=1, per_page=10
+                candidates, _ = await self._anilist.search_anime_with_variants(
+                    folder_name, page=1, per_page=10
                 )
                 if candidates:
                     match_result = self._matcher.find_best_match_with_season(

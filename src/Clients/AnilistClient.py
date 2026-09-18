@@ -16,6 +16,7 @@ from src.Clients.AnilistHealth import (
     AniListUnavailableError,
     looks_like_outage,
 )
+from src.Matching.Normalizer import search_title_variants
 
 logger = logging.getLogger(__name__)
 
@@ -532,6 +533,32 @@ class AniListClient:
             {"search": query, "page": page, "perPage": per_page},
         )
         return data.get("Page", {}).get("media", [])
+
+    async def search_anime_with_variants(
+        self, title: str, page: int = 1, per_page: int = 10
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Search AniList, retrying with punctuation-restored title variants.
+
+        A media folder name cannot contain a colon, so "Re:Zero kara Hajimeru
+        Isekai Seikatsu" reaches us as "ReZero kara Hajimeru Isekai Seikatsu" —
+        and AniList returns nothing for the run-together form. Falls back to the
+        variants from :func:`search_title_variants` in order.
+
+        Returns ``(results, search_term_used)``; the term is the original title
+        when nothing matched, so callers can report what they actually tried.
+        """
+        variants = search_title_variants(title)
+        for index, variant in enumerate(variants):
+            results = await self.search_anime(variant, page=page, per_page=per_page)
+            if results:
+                if index:
+                    logger.info(
+                        "AniList search matched on variant %r (original %r)",
+                        variant,
+                        variants[0],
+                    )
+                return results, variant
+        return [], variants[0] if variants else title
 
     async def get_anime_by_id(self, anime_id: int) -> dict[str, Any] | None:
         data = await self._execute_query(GET_ANIME_BY_ID_QUERY, {"id": anime_id})
