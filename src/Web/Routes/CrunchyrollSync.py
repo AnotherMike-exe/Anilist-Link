@@ -114,7 +114,6 @@ async def crunchyroll_hub(
             "user": user,
             "active_tab": tab,
             "title_display": title_display,
-            "version": "0.1.0",
         },
     )
 

@@ -355,7 +355,6 @@ async def unified_library(
             "arr_enabled": arr_enabled,
             "message": request.query_params.get("message") or "",
             "error": request.query_params.get("error") or "",
-            "version": "0.1.0",
         },
     )
 

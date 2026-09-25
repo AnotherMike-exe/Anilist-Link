@@ -108,6 +108,5 @@ async def tools_page(request: Request) -> HTMLResponse:
             "radarr_configured": radarr_configured,
             "downloads_configured": downloads_configured,
             "has_library": has_library,
-            "version": "0.1.0",
         },
     )

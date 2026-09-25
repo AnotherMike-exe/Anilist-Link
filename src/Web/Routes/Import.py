@@ -448,6 +448,5 @@ async def import_page(request: Request) -> HTMLResponse:
         {
             "request": request,
             "import_root": await _import_root(db),
-            "version": "0.1.0",
         },
     )
