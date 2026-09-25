@@ -1,0 +1,7 @@
+# Puts the owner on every pull request automatically, so a drive-by contribution
+# cannot sit unseen. Goes at .github/CODEOWNERS.
+#
+# Do not turn on "require review from Code Owners" in the ruleset while this repo
+# has one maintainer: it makes every pull request need an approval the owner
+# cannot give to themselves.
+* @AnotherMike-exe

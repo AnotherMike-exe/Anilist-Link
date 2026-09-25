@@ -1,0 +1,33 @@
+# Dependabot version updates. Grouped, so one ecosystem opens one pull request a week.
+# Pull requests target dev, the integration branch, and reach main with a release.
+version: 2
+updates:
+  # Always present. A pinned action rots, and an unmaintained action is a supply
+  # chain problem.
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+    groups:
+      python:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    labels: [dependencies]
