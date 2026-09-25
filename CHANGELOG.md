@@ -36,10 +36,12 @@ behavior.
 
 ### Fixed
 - `/api/status` and the page footer showed version `0.1.0`
+- `/api/webhook/info` returned an error instead of the Sonarr and Radarr webhook URLs
 
 ### Security
 - The AniList sign-in result page escapes its query values. A crafted link could run
   script in the dashboard before this fix.
+- Starlette 1.x and Jinja2 3.1.6 or later, which close open security advisories
 
 [Unreleased]: https://github.com/AnotherMike-exe/Anilist-Link/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/AnotherMike-exe/Anilist-Link/releases/tag/v1.0.0
