@@ -1,6 +1,6 @@
 services:
   AnilistLink:
-    image: dogberttech/anilist-link:latest
+    image: ghcr.io/anothermike-exe/anilist-link:latest
     # To build locally instead: comment out image above and uncomment below
     # build: .
     # To build dev variant (includes /config/dev-tools/ scripts):
