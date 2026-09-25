@@ -29,6 +29,7 @@ from src.Sync.WatchlistRefresh import (
 from src.Sync.WatchSyncer import CrunchyrollSyncProgress, WatchSyncer
 from src.Utils.Config import AppConfig, load_config, load_config_from_db_settings
 from src.Utils.Logging import get_logger, setup_logging
+from src.Utils.Version import APP_VERSION
 from src.Web.App import create_app
 from src.Web.Routes.Helpers import create_group_builder, create_title_matcher
 
@@ -316,7 +317,7 @@ async def main() -> None:
     config = load_config()
     setup_logging(config.debug, config.log_path)
 
-    logger.info("Anilist-Link v1.0.2 starting")
+    logger.info("Anilist-Link v%s starting", APP_VERSION)
     logger.info("Debug mode: %s", config.debug)
 
     # Phase 2: initialize database and run migrations

@@ -1,7 +1,9 @@
 [project]
 name = "anilist-link"
-version = "1.0.2"
+dynamic = ["version"]
 description = "Self-hosted bridge between AniList and media platforms (Crunchyroll, Plex, Jellyfin)"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0,<0.116.0",
@@ -32,8 +34,11 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = { attr = "src.Utils.Version.APP_VERSION" }
 
 [tool.setuptools.packages.find]
 include = ["src*"]

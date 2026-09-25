@@ -22,6 +22,7 @@ from src.Sync.CacheSynonymsBackfill import backfill_cache_synonyms
 from src.Sync.WatchlistRefresh import watchlist_activity_loop
 from src.Utils.Config import AppConfig
 from src.Utils.Time import to_local, to_local_date
+from src.Utils.Version import APP_VERSION
 from src.Web.ActivityTracker import ActivityTracker
 
 logger = logging.getLogger(__name__)
@@ -129,7 +130,7 @@ def create_app(
 
     app = FastAPI(
         title="Anilist-Link",
-        version="1.0.2",
+        version=APP_VERSION,
         lifespan=lifespan,
     )
 
@@ -140,6 +141,7 @@ def create_app(
     app.state.scheduler = scheduler
     app.state.activity_tracker = ActivityTracker()
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    templates.env.globals["version"] = APP_VERSION
 
     # All stored timestamps are UTC; render them in the TZ the operator
     # configured so scheduled runs do not appear hours in the future.

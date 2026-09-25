@@ -17,6 +17,7 @@ from src.Clients.AnilistHealth import (
     looks_like_outage,
 )
 from src.Matching.Normalizer import search_title_variants
+from src.Utils.Version import APP_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -449,7 +450,10 @@ class AniListClient:
         self._http = httpx.AsyncClient(
             timeout=30.0,
             headers={
-                "User-Agent": "AnilistLink/1.0 (https://github.com/Mprice12337/Anilist-Link)",
+                "User-Agent": (
+                    f"AnilistLink/{APP_VERSION} "
+                    "(https://github.com/AnotherMike-exe/Anilist-Link)"
+                ),
                 "Accept": "application/json",
             },
         )
