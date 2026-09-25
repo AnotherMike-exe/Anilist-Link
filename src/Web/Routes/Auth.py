@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import json
 import logging
 import urllib.parse
 from datetime import datetime, timezone
@@ -128,6 +130,11 @@ async def anilist_callback(
     )
 
 
+def _js_literal(value: str) -> str:
+    """Encode a string as a JS literal that is safe inside a <script> block."""
+    return json.dumps(value).replace("<", "\\u003c").replace(">", "\\u003e")
+
+
 @router.get("/anilist/done", response_class=HTMLResponse)
 async def anilist_done(
     request: Request,
@@ -162,13 +169,13 @@ async def anilist_done(
 <div class="box">
   <div class="icon">✗</div>
   <h2>Authorization failed</h2>
-  <p class="detail">{detail}</p>
+  <p class="detail">{html.escape(detail)}</p>
   <button onclick="window.close()">Close</button>
 </div>
 <script>
   if (window.opener && !window.opener.closed) {{
     window.opener.postMessage(
-      {{ type: 'anilist_auth_error', error: {repr(detail)} }},
+      {{ type: 'anilist_auth_error', error: {_js_literal(detail)} }},
       window.location.origin
     );
   }}
@@ -189,14 +196,14 @@ async def anilist_done(
 <body>
 <div class="box">
   <div class="check">✓</div>
-  <h2>Linked as {username}</h2>
+  <h2>Linked as {html.escape(username)}</h2>
   <p>You can close this tab and return to setup.</p>
 </div>
 <script>
   // Notify onboarding page (if opened as a popup) then close
   if (window.opener && !window.opener.closed) {{
     window.opener.postMessage(
-      {{ type: 'anilist_auth_done', username: {repr(username)}, user_id: {repr(user_id)} }},
+      {{ type: 'anilist_auth_done', username: {_js_literal(username)}, user_id: {_js_literal(user_id)} }},
       window.location.origin
     );
     setTimeout(function() {{ window.close(); }}, 800);
