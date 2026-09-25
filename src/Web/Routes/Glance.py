@@ -53,6 +53,7 @@ async def glance_rate_completed(request: Request, key: str = "") -> Response:
     score_format = await db.get_setting("anilist.score_format") or "POINT_10"
 
     return templates.TemplateResponse(
+        request,
         "glance_rate.html",
         {
             "request": request,

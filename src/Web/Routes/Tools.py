@@ -95,6 +95,7 @@ async def tools_page(request: Request) -> HTMLResponse:
         pass
 
     return templates.TemplateResponse(
+        request,
         "tools.html",
         {
             "request": request,

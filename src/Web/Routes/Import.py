@@ -444,6 +444,7 @@ async def import_page(request: Request) -> HTMLResponse:
     """Review and import media dropped into the import folder."""
     db = request.app.state.db
     return request.app.state.templates.TemplateResponse(
+        request,
         "import.html",
         {
             "request": request,

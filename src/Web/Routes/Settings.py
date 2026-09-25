@@ -315,6 +315,7 @@ async def settings_page(request: Request, saved: int = 0) -> HTMLResponse:
             selected_jellyfin_ids = []
 
     return templates.TemplateResponse(
+        request,
         "settings.html",
         {
             "request": request,

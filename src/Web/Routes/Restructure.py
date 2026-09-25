@@ -680,6 +680,7 @@ async def restructure_wizard(request: Request) -> Response:
                 pass
 
     return templates.TemplateResponse(
+        request,
         "restructure_wizard.html",
         {
             "request": request,
@@ -704,6 +705,7 @@ async def restructure_progress_page(request: Request) -> HTMLResponse:
     )
 
     return templates.TemplateResponse(
+        request,
         "restructure_progress.html",
         {
             "request": request,
@@ -931,6 +933,7 @@ async def restructure_preview(request: Request) -> Response:
     grouped_moves = _build_grouped_moves(plan)
 
     return templates.TemplateResponse(
+        request,
         "restructure_preview.html",
         {
             "request": request,
@@ -1365,6 +1368,7 @@ async def restructure_report_page(request: Request) -> HTMLResponse:
     errors = sum(1 for e in entries if e["status"] != "success")
 
     return templates.TemplateResponse(
+        request,
         "restructure_report.html",
         {
             "request": request,
@@ -1403,6 +1407,7 @@ async def restructure_plan_detail(request: Request, plan_id: int) -> Response:
     log_entries = await db.get_restructure_log_for_plan(plan_id)
 
     return templates.TemplateResponse(
+        request,
         "restructure_plan_detail.html",
         {
             "request": request,
@@ -1518,6 +1523,7 @@ async def restructure_results(request: Request) -> Response:
         )
 
     return templates.TemplateResponse(
+        request,
         "restructure_results.html",
         {
             "request": request,

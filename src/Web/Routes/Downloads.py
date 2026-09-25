@@ -37,6 +37,7 @@ async def download_page(request: Request) -> HTMLResponse:
     radarr_configured = bool(config.radarr.url and config.radarr.api_key)
 
     return templates.TemplateResponse(
+        request,
         "download_manager.html",
         {
             "request": request,
