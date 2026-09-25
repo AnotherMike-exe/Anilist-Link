@@ -2,7 +2,7 @@
 # Using slim-bookworm for Chromium compatibility (required for Crunchyroll client)
 
 # ---- Build stage ----
-FROM python:3.11-slim-bookworm AS buildstage
+FROM python:3.14-slim-bookworm AS buildstage
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ COPY src/Utils/Version.py ./src/Utils/Version.py
 RUN pip install --no-cache-dir .
 
 # ---- Final stage ----
-FROM python:3.11-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 LABEL org.opencontainers.image.source="https://github.com/AnotherMike-exe/Anilist-Link" \
       org.opencontainers.image.licenses="MIT" \
