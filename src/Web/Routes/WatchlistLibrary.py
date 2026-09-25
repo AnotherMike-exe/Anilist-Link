@@ -139,6 +139,7 @@ async def library_page(request: Request) -> HTMLResponse:
             entry["local_status"] = "arr"
 
     return templates.TemplateResponse(
+        request,
         "watchlist_library.html",
         {
             "request": request,

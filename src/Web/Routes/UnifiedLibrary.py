@@ -342,6 +342,7 @@ async def unified_library(
     title_display = await db.get_setting("app.title_display") or "romaji"
 
     return templates.TemplateResponse(
+        request,
         "unified_library.html",
         {
             "request": request,

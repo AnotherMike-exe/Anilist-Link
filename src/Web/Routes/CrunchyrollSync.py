@@ -102,6 +102,7 @@ async def crunchyroll_hub(
     title_display = await db.get_setting("app.title_display") or "romaji"
 
     return templates.TemplateResponse(
+        request,
         "crunchyroll.html",
         {
             "request": request,

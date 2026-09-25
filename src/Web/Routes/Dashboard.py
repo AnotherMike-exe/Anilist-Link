@@ -84,6 +84,7 @@ async def dashboard(
         next_sync = job_status[0].get("next_run_time")
 
     return templates.TemplateResponse(
+        request,
         "dashboard.html",
         {
             "request": request,
