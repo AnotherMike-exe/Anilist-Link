@@ -145,7 +145,6 @@ async def onboarding_page(request: Request) -> HTMLResponse:
             "anilist_username": anilist_username,
             "has_plexpass": has_plexpass,
             "skip_scan_started": skip_scan_ready or skip_scan_active,
-            "version": "0.1.0",
         },
     )
 
