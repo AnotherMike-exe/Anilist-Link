@@ -1,153 +1,98 @@
 # Anilist-Link
 
-A self-hosted Docker container that bridges AniList with Plex, Jellyfin, and Crunchyroll — syncing watch progress and providing AniList-powered metadata.
+> Connects AniList to Plex, Jellyfin, Crunchyroll, Sonarr and Radarr from one self-hosted container.
 
-## Features
+Anilist-Link is for anime collectors who track their shows on AniList and keep a
+local library. It renames and reorganizes anime files from AniList data, writes
+AniList metadata to Plex and Jellyfin, and syncs watch progress to AniList. It also
+sends add requests to Sonarr and Radarr with the AniList alternative titles.
 
-- **File Organization** — Rename and restructure anime files using AniList series data (L1/L2/L3 restructure wizard)
-- **Metadata** — AniList-powered metadata provider for Plex and Jellyfin anime libraries (titles, posters, summaries, genres, ratings)
-- **Watch Sync** — Sync watch progress between Crunchyroll, Plex, Jellyfin, and AniList (bidirectional for Plex/Jellyfin)
-- **Download Management** — Add anime to Sonarr/Radarr with AniList alternative titles
-- **Rate Your Completed Shows** — Dashboard nudge for AniList entries marked Completed but never rated, with one-click rating in your account's configured scale (stars, 10-point, 100-point, etc.); optional [Glance](https://github.com/glanceapp/glance) dashboard widget
-- **AniList outage handling** — Detects when AniList disables its API or reduces its rate limit, pauses all syncs and scans instead of hammering it, shows a dashboard banner with how long it has been down, and resumes automatically once it recovers
-- Per-user AniList account linking via OAuth2
-- Web dashboard for configuration, mapping review, sync monitoring, and onboarding
-
-## Quick Start
-
-```bash
-docker pull dogberttech/anilist-link:latest
-docker compose up -d
-```
-
-Then navigate to `http://localhost:9876` for the web dashboard.
+- **File organization**: a wizard that renames folders and files, or restructures the full library
+- **Metadata**: AniList titles, summaries, posters, genres and ratings in Plex and Jellyfin
+- **Watch sync**: Crunchyroll to AniList, and two-way sync with Plex and Jellyfin
+- **Downloads**: Sonarr and Radarr add requests, with post-download file organization
+- **Rate completed shows**: a dashboard card for completed AniList entries that have no score
 
 ---
 
-## Docker Deployment
+## Usage
 
-### Docker Compose
-
-```yaml
-services:
-  AnilistLink:
-    image: dogberttech/anilist-link:latest
-    container_name: AnilistLink
-    restart: unless-stopped
-    shm_size: "2g"
-    volumes:
-      - /mnt/user/appdata/AnilistLink:/config
-      - /mnt/user/media/anime:/media/anime    # mount to the same path your media server uses
-    environment:
-      # User/Group Management
-      - PUID=99
-      - PGID=100
-      - UMASK=002
-      # System
-      - TZ=America/New_York
-      - DEBUG=false
-      # All other settings (AniList, Plex, Jellyfin, Crunchyroll, Sonarr, Radarr)
-      # are configured via the onboarding wizard at http://localhost:9876
-    ports:
-      - "9876:9876"
-```
-
-### Volumes
-
-| Container Path | Description | Example Host Path |
-|---|---|---|
-| `/config` | Config, SQLite database (`anilist_link.db`), and app logs (`anilist_link.log`) | `/mnt/user/appdata/AnilistLink` |
-| `/media/anime` | Your anime library — must be writable; used for all rename/restructure operations | `/mnt/user/media/anime` |
-
-> The media volume name is flexible — use any container path that matches how Plex/Jellyfin mount the same files. See **Media Path Alignment** below.
-
-### Port
-
-| Port | Protocol | Description |
-|---|---|---|
-| `9876` | TCP | Web dashboard |
-
-### Environment Variables
-
-Service credentials (AniList, Plex, Jellyfin, Crunchyroll, Sonarr, Radarr) are configured through the onboarding wizard at `http://localhost:9876` — no env vars needed for those. Only system-level vars need to be set at container start.
-
-| Variable | Default | Description |
-|---|---|---|
-| `PUID` | `99` | User ID for file ownership (`99` = Unraid `nobody`) |
-| `PGID` | `100` | Group ID for file ownership (`100` = Unraid `users`) |
-| `UMASK` | `002` | File creation mask |
-| `TZ` | `UTC` | Timezone (e.g., `America/New_York`) |
-| `DEBUG` | `false` | Enable verbose debug logging |
-
-### Media Path Alignment
-
-The file restructure and rename features read file paths from Plex or Jellyfin and move those files on disk. For this to work, **mount your anime library to the same container path in Anilist-Link as you use in Plex/Jellyfin**:
-
-```
-Host:          /mnt/user/media/anime
-Plex:          /mnt/user/media/anime → /media/anime
-Jellyfin:      /mnt/user/media/anime → /media/anime
-Anilist-Link:  /mnt/user/media/anime → /media/anime   ← must match
-```
-
-If you have an existing setup where your media server uses a different internal path than Anilist-Link (e.g., Plex reports `/data/anime` but your container mounts it at `/media/anime`), you can configure path prefix translation under **Settings → Library Restructuring** in the web dashboard.
-
-### Glance Integration
-
-The "Rate Your Completed Shows" card can be embedded in a [Glance](https://github.com/glanceapp/glance) dashboard as an `iframe` widget, so you can rate completed anime without leaving Glance.
-
-1. In Anilist-Link, go to **Settings → Integrations** and click **Generate key**.
-2. Click **Copy Glance snippet** and paste it into your `glance.yml`. The snippet has two parts:
-
-   A one-time listener under the top-level `document.head` that auto-resizes the iframe to fit its content (so an empty "nothing to rate" card collapses instead of leaving a tall empty box):
+1. Save this as `docker-compose.yml`:
 
    ```yaml
-   document:
-     head: |
-       <script>
-       window.addEventListener('message', function (event) {
-         if (!event.data || event.data.source !== 'anilist-link-glance') return;
-         document.querySelectorAll('iframe[src*="/glance/rate-completed"]').forEach(function (frame) {
-           var h = Math.max(60, event.data.height + 20);
-           frame.style.height = h + 'px';
-           frame.setAttribute('height', h);
-         });
-       });
-       </script>
+   services:
+     AnilistLink:
+       image: ghcr.io/anothermike-exe/anilist-link:latest
+       container_name: AnilistLink
+       restart: unless-stopped
+       shm_size: "2g"
+       volumes:
+         - /mnt/user/appdata/AnilistLink:/config
+         - /mnt/user/media/anime:/media/anime
+       environment:
+         - PUID=99
+         - PGID=100
+         - UMASK=002
+         - TZ=America/New_York
+       ports:
+         - "9876:9876"
    ```
 
-   And the widget itself, under the page/column where you want the card:
+2. Start the container:
 
-   ```yaml
-   - type: iframe
-     title: Rate Completed Shows
-     source: http://<your-anilist-link-host>:9876/glance/rate-completed?key=<your-key>
-     height: 60   # starting point — the script above grows/shrinks it after load
+   ```bash
+   docker compose up -d
    ```
-3. Restart Glance. The widget lists anything marked Completed on AniList that hasn't been rated yet, and rates it directly from the tile. Its background is transparent so it blends into your dashboard theme.
 
-The `document.head` listener is a one-time addition regardless of how many of these widgets you add — the `src*=` selector matches any iframe pointed at the endpoint.
+3. Open `http://localhost:9876`. The onboarding wizard starts on the first visit.
+4. Follow the wizard to add your media folders and link AniList, Plex, Jellyfin,
+   Crunchyroll, Sonarr and Radarr. Each service is optional.
 
-The key is required — `/glance/rate-completed` is the one endpoint in this app that isn't local-network-trust by default, since it's meant to be reached from outside a normal browser session. Regenerating the key from Settings invalidates the old one immediately.
+Working when: the dashboard at `http://localhost:9876` shows your linked AniList
+account.
 
-### Notes
+## Details
 
-- **`shm_size: "2g"`** — Required for Chromium (used by the Crunchyroll client). Reduce to `512m` or remove if not using Crunchyroll.
-- **AniList OAuth2** — Register your app at [anilist.co/settings/developer](https://anilist.co/settings/developer) to obtain `ANILIST_CLIENT_ID` and `ANILIST_CLIENT_SECRET`.
-- **Logs** — View with `docker logs AnilistLink` or tail the file at `/config/logs/anilist_link.log` inside the container.
-- **Permissions** — `PUID`/`PGID` must match the owner of your media files on the host, otherwise renames will fail with permission errors.
-- **AniList downtime** — When AniList takes its API offline, a banner appears at the top of the dashboard and background work pauses. Anilist-Link re-checks on its own once an hour (and once on startup); **Check now** in the banner forces an immediate re-check. Nothing needs restarting — jobs resume on their next scheduled run.
+The dashboard runs on port 9876. The database and the logs live in `/config`
+(`anilist_link.db` and `logs/anilist_link.log`). Set `PUID` and `PGID` to the host
+user that owns your media, or renames fail with permission errors. The full tables of
+variables, volumes, ports and endpoints are in
+[docs/QUICK-REFERENCE.md](docs/QUICK-REFERENCE.md).
 
----
+Known limitations:
+
+- **Media path alignment.** Anilist-Link moves the files that Plex or Jellyfin
+  report. Mount your anime library at the same container path that your media server
+  uses, or the reported paths do not exist inside this container.
+- **Shared memory for Crunchyroll.** The Crunchyroll client runs Chromium, which
+  needs `shm_size: "2g"`. If you do not use Crunchyroll, you can decrease it to
+  `512m` or remove it.
+- **AniList outages.** When AniList disables its API, a banner shows on the
+  dashboard and all scans and syncs pause. Anilist-Link checks one time each hour
+  and continues on its own when AniList recovers.
+- **Glance.** The "Rate Your Completed Shows" card can show in a
+  [Glance](https://github.com/glanceapp/glance) dashboard. The setup is in
+  [docs/QUICK-REFERENCE.md](docs/QUICK-REFERENCE.md#glance-integration).
 
 ## Documentation
 
-- [Architecture](docs/ARCHITECTURE.md) - System design and component overview
-- [Developer Setup](docs/DEV-SETUP.md) - Development environment setup
-- [Quick Reference](docs/QUICK-REFERENCE.md) - Best practices and common commands
-- [Project Structure](docs/PROJECT-STRUCTURE.md) - Project organization reference
-- [Season Mapping Repair](docs/SEASON-MAPPING-REPAIR.md) - One-off cleanup for AniList entries affected by the Crunchyroll season-mapping bug
+- [Architecture](docs/ARCHITECTURE.md): system design and the decisions behind it
+- [Dev setup](docs/DEV-SETUP.md): from a clone to a running copy
+- [Quick reference](docs/QUICK-REFERENCE.md): commands, variables, ports, endpoints and troubleshooting
+- [Season mapping repair](docs/SEASON-MAPPING-REPAIR.md): a one-time cleanup for AniList entries that the Crunchyroll season-mapping bug changed
 
-## Related Projects
+## Attributions
 
-- [Crunchyroll-Anilist-Sync](https://github.com/Mprice12337/Crunchyroll-Anilist-Sync) - The predecessor project being merged into Anilist-Link
+- [AniList API](https://anilist.gitbook.io/anilist-apiv2-docs): the source of all metadata and the target of watch sync
+- Crunchyroll-Anilist-Sync: the predecessor project by the same author. Anilist-Link replaces it.
+- [FastAPI](https://fastapi.tiangolo.com/): the web dashboard and API
+- [httpx](https://www.python-httpx.org/): the HTTP client for all external services
+- [APScheduler](https://github.com/agronholm/apscheduler): the scheduled scans and syncs
+- [rapidfuzz](https://github.com/rapidfuzz/RapidFuzz): fuzzy title comparison
+- [Selenium](https://www.selenium.dev/) and [undetected-chromedriver](https://github.com/ultrafunkamsterdam/undetected-chromedriver): the Crunchyroll login
+
+MIT — see [LICENSE](LICENSE)
+
+---
+
+**Repository**: https://github.com/AnotherMike-exe/Anilist-Link · **Maintainer**: Plum Solutions

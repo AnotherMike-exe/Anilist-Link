@@ -1,853 +1,192 @@
-# CLAUDE.md - Anilist-Link
+# CLAUDE.md — Anilist-Link
 
-> **Purpose**: This file serves as your project's memory for Claude Code. It defines rules, workflows, and preferences that Claude will automatically follow when working on your codebase.
+Project memory for Claude Code. Keep it true: a line that is wrong is worse than a line
+that is missing, because it is trusted.
 
-## Project Overview
+## What this is
 
-**Anilist-Link** is a self-hosted Docker container that connects AniList with media platforms (Plex, Jellyfin, Crunchyroll) and download managers (Sonarr, Radarr). It delivers four distinct functional pillars, each addressing a different aspect of anime library management. The project consolidates and expands the existing Crunchyroll-Anilist-Sync container into a unified, multi-platform service.
+Anilist-Link is a self-hosted web service that connects AniList with media servers
+(Plex, Jellyfin), Crunchyroll, and download managers (Sonarr, Radarr). One person runs
+it for a home anime library. It does four jobs: it renames and reorganizes anime files
+with AniList data, writes AniList metadata to Plex and Jellyfin, syncs watch progress to
+AniList, and sends add requests to Sonarr and Radarr with AniList alternative titles.
+The design is in `docs/ARCHITECTURE.md`.
 
-### The 4 Pillars
+**Stage**: v1.0.0, the first tagged release
+**Deployed on**: Docker (Unraid or any Docker host)
 
-| # | Pillar | Summary | Priority |
-|---|--------|---------|----------|
-| 2 | **File Organization** | Rename/reorganize anime files into standardized structure using AniList data | 1st |
-| 3 | **Metadata from AniList** | Write AniList metadata (titles, descriptions, posters, genres, ratings) to Plex/Jellyfin | 2nd |
-| 1 | **Watch Status Sync** | Sync watch progress between Crunchyroll/Plex/Jellyfin and AniList | 3rd |
-| 4 | **Download Management** | Send add requests to Sonarr/Radarr with AniList alternative titles | 4th |
+## Stack
 
-Implementation order: **P2 → P3 → P1 → P4**
+| Part | Choice |
+|---|---|
+| Language | Python 3.11 or newer (development uses 3.12) |
+| Framework | FastAPI with server-rendered Jinja2 templates |
+| Data store | SQLite through aiosqlite, `/config/anilist_link.db` in the container, `./data/anilist_link.db` locally |
+| Jobs | APScheduler |
+| HTTP client | httpx (async). Crunchyroll auth uses Selenium and Chromium |
+| Matching | rapidfuzz |
+| Runtime | Docker, `ghcr.io/anothermike-exe/anilist-link`, linux/amd64 and linux/arm64 |
 
-### Key Features
-- **P2 — File Organization**: Library restructure wizard (analyze → preview → execute), series group-aware file renaming
-- **P3 — Metadata**: Full scan/match/apply pipeline for Plex, library browser with mapping management, AniList metadata writing (titles, summaries, posters, genres, ratings)
-- **P1 — Watch Sync**: Crunchyroll→AniList sync with smart pagination and status transitions (Plex/Jellyfin sync planned)
-- **P4 — Downloads**: Sonarr/Radarr integration with add requests, alt titles, post-download file organization, series path sync, and webhook automation
-- **Shared**: AniList OAuth2 account linking, series group builder, fuzzy title matching, web dashboard with GUI settings
-
-### Project Context
-- **Stage**: v1.0.2 — All 4 pillars complete (P2 File Organization, P3 Metadata, P1 Watch Sync, P4 Downloads)
-- **Team Size**: Solo
-- **Priority Focus**: Functionality first, then polish
-
----
-
-## Claude Code Preferences
-
-### Workflow Mode
-- **Default Model**: Sonnet for daily work / Opus for complex planning and architecture
-- **Planning Strategy**: Plan for complex tasks only (multi-file changes, new components)
-- **Testing Approach**: Write tests after implementation, aim for coverage on core logic
-- **Auto-Accept**: Disabled (review changes before applying)
-
-### Communication Style
-- **Verbosity**: Concise — brief explanations unless asked for detail
-- **Progress Updates**: Yes, keep me informed of progress on multi-step tasks
-- **Error Handling**: Explain the issue then fix it
-
-### Task Management
-- **To-Do Lists**: Auto-generate for multi-step tasks
-- **Subagents**: Use for exploration and parallel work
-- **Research**: Proactive web search when needed for API documentation or library usage
-
----
-
-## Technology Stack
-
-### Backend
-- **Language**: Python 3.11+
-- **Framework**: FastAPI (async, modern, built-in OpenAPI docs)
-- **Database**: SQLite (via aiosqlite for async access)
-- **Background Jobs**: APScheduler (periodic metadata scans and watch syncs)
-- **Authentication**: AniList OAuth2 for per-user account linking
-- **HTTP Client**: httpx (async)
-- **Fuzzy Matching**: rapidfuzz
-
-### Frontend
-- **Framework/Library**: FastAPI with Jinja2 templates (server-rendered)
-- **CSS Framework**: Minimal/custom CSS (single-page dashboard)
-- **State Management**: N/A (server-rendered pages)
-
-### Infrastructure
-- **Containerization**: Docker, Docker Compose
-- **CI/CD**: GitHub Actions
-- **Hosting**: Self-hosted (Unraid or any Docker host)
-
-### Key Dependencies
-> Packages Claude should be aware of with brief descriptions
-- `fastapi` - Async web framework for the dashboard and API endpoints
-- `uvicorn` - ASGI server to run the FastAPI application
-- `httpx` - Async HTTP client for all external API calls (AniList, Plex, Jellyfin, Crunchyroll)
-- `aiosqlite` - Async SQLite driver for non-blocking database access
-- `rapidfuzz` - High-performance fuzzy string matching for title matching engine
-- `apscheduler` - Background job scheduling for periodic scans and syncs
-- `jinja2` - Template engine for the web dashboard
-- `python-multipart` - Required by FastAPI for form data handling
-
----
-
-## Project Structure
+## Layout
 
 ```
-├── _resources/             # Reference files for development (NOT in git)
-│   ├── Examples/           # API response samples, code templates
-│   ├── Research/           # Research documents, comparisons
-│   ├── Assets/             # Design files, mockups, diagrams
-│   └── Notes/              # Development notes, ideas, scratchpad
-├── docs/                   # Project documentation
-│   ├── ARCHITECTURE.md     # System architecture and design decisions
-│   ├── CLAUDE.md           # Claude Code configuration (symlinked to root)
-│   ├── DEV-SETUP.md        # Developer setup guide
-│   ├── QUICK-REFERENCE.md  # Best practices quick reference
-│   └── PROJECT-STRUCTURE.md # Project structure reference
-├── src/                    # Main application source code
-│   ├── Clients/            # External API client modules
-│   ├── Matching/           # Fuzzy title matching engine
-│   ├── Scanner/            # Metadata scanning pipeline
-│   ├── Sync/               # Watch status synchronization
-│   ├── Web/                # FastAPI web dashboard
-│   ├── Database/           # SQLite database layer
-│   ├── Scheduler/          # APScheduler job definitions
-│   ├── Utils/              # Shared utilities (config, logging)
-│   └── Main.py             # Application entry point
-├── tests/                  # Test suite
-│   ├── Unit/               # Unit tests
-│   └── Integration/        # Integration tests
-├── scripts/                # Automation scripts
-├── README.md               # Main project documentation (root level only)
-├── CLAUDE.md               # Symlink to docs/CLAUDE.md
-└── .gitignore              # Must include _resources/
+src/Clients/     one client class for each external API (AniList, Plex, Jellyfin, Crunchyroll, Sonarr, Radarr, Prowlarr, qBittorrent, TVMaze)
+src/Database/    the only code that touches SQLite: Connection.py, Models.py, Migrations.py
+src/Matching/    title normalization, fuzzy matching, season and cour parsing
+src/Scanner/     metadata scan pipeline, series groups, library restructurer
+src/Sync/        watch sync (Crunchyroll, Plex, Jellyfin), download sync, AniList health monitor
+src/Download/    Sonarr and Radarr orchestration and post-processing
+src/Scheduler/   APScheduler job registration (Jobs.py)
+src/Web/         FastAPI app factory (App.py), Routes/, Templates/, Static/
+src/Utils/       Config.py, logging, naming templates, path translation
+src/Main.py      entry point: config, database, migrations, scheduler, uvicorn
+tests/Unit/      the test suite
+scripts/dev-tools/  container entrypoint and dev-only database scripts
+docs/            every document except README.md
+_resources/      dev references, never in git
 ```
 
-### Special Directories
+## Commands
 
-#### `_resources/` (Not in Git)
-**Purpose**: Development reference materials for both human developers and AI assistants
-
-**Contains**:
-- Example code snippets and templates
-- API response samples for testing (AniList GraphQL responses, Plex/Jellyfin API responses)
-- Design mockups and diagrams
-- Research documents on reverse-engineered APIs (Crunchyroll)
-- Any reference material that helps development but shouldn't be in version control
-
-**Important**:
-- This folder is **NEVER committed to git**
-- Add `_resources/` to `.gitignore`
-- Developers and Claude can freely add/reference files here
-- Perfect for storing AniList API response examples, Plex metadata samples, etc.
-
-#### `docs/` (Documentation Repository)
-**Purpose**: All project documentation except README.md
-
-**Required Files**:
-- **`ARCHITECTURE.md`**: System architecture, design patterns, technical decisions
-- **`CLAUDE.md`**: Claude Code configuration (symlinked to root for auto-detection)
-- **`DEV-SETUP.md`**: Developer environment setup procedures
-- **`QUICK-REFERENCE.md`**: Best practices and common commands
-
-### Key Directories
-- **`src/Clients/`**: All external API client modules (AniList, Plex, Jellyfin, Crunchyroll, Sonarr, Radarr, Prowlarr, qBittorrent, TVMaze)
-- **`src/Matching/`**: Title matching engine with fuzzy algorithms and normalization
-- **`src/Scanner/`**: Metadata scanning pipeline (scan → match → cache → apply)
-- **`src/Sync/`**: Watch status synchronization from media platforms to AniList
-- **`src/Web/`**: FastAPI dashboard with routes, templates, and static assets
-- **`src/Database/`**: SQLite connection management, models, and migrations
-
----
-
-## Documentation Organization
-
-### File Structure
-All documentation files (except `README.md`) should be in the `/docs` folder:
-
-```
-├── README.md                    # Root level - main project overview
-├── CLAUDE.md                    # Symlink to docs/CLAUDE.md
-├── _resources/                  # NOT in git - development references
-└── docs/
-    ├── ARCHITECTURE.md          # Required - system architecture
-    ├── CLAUDE.md                # Actual file location
-    ├── DEV-SETUP.md             # Developer setup guide
-    ├── QUICK-REFERENCE.md       # Best practices quick reference
-    └── PROJECT-STRUCTURE.md     # Project structure reference
-```
-
-### Documentation Best Practices
-
-1. **Keep README.md concise** - Link to detailed docs in `/docs`
-2. **Update ARCHITECTURE.md** when making significant design changes
-3. **Document decisions** - Explain *why*, not just *what*
-4. **Include diagrams** - Visual representations in ARCHITECTURE.md
-5. **Version documentation** - Keep docs in sync with code changes
-6. **Use consistent formatting** - Follow project markdown standards
-
-### Using `_resources/` for Documentation Development
-
-Store in `_resources/` (not git):
-- Draft documentation
-- Research notes for docs
-- API response examples for reference
-- Crunchyroll API reverse-engineering notes
-
-Move to `/docs` when:
-- Documentation is complete and reviewed
-- Content is stable and accurate
-- Ready for team consumption
-
----
-
-## Core Architecture
-
-### Primary Models/Components
-- **AniList Client**: GraphQL client with OAuth2 flow, rate limiting (90 req/min), public queries, and authenticated mutations [implemented]
-- **AniList Health / Circuit Breaker**: Shared availability tracker (`src/Clients/AnilistHealth.py`) — detects AniList's "API temporarily disabled" 403s, reduced rate limits, sustained 429s and persistent 5xx; fails calls fast while down, halts scheduled jobs and per-item scan/sync loops, and drives the dashboard status banner [implemented]
-- **AniList Health Monitor**: Background loop (`src/Sync/AnilistHealthMonitor.py`) that probes for recovery once an hour (immediately on restart), persists outage state to `app_settings` so downtime survives restarts, and posts a recovery notification [implemented]
-- **Plex Client**: Library enumeration, metadata writing, per-user watch tracking via Plex.tv API [implemented]
-- **Jellyfin Client**: Library access, metadata writing, watch status tracking via open API [implemented]
-- **Crunchyroll Client**: Reverse-engineered auth + watch history retrieval with session persistence [implemented]
-- **Sonarr Client**: Sonarr API v3 integration for series add/lookup [implemented]
-- **Radarr Client**: Radarr API v3 integration for movie add/lookup [implemented]
-- **Title Matching Engine**: rapidfuzz-based multi-algorithm fuzzy matching with anime-specific normalization [implemented]
-- **Metadata Scanner**: Orchestrates scan → match → cache → apply pipeline across Plex libraries [implemented]
-- **Jellyfin Metadata Scanner**: Parallel scanner for Jellyfin libraries [implemented]
-- **Series Group Builder**: BFS traversal of AniList SEQUEL/PREQUEL graph to build series groups [implemented]
-- **Library Restructurer**: Analyzes and reorganizes anime files into Structure A; nests lone franchise entries (e.g. a movie) under their series-group ROOT folder, resolving the root via the series group or a PREQUEL-chain walk [implemented]
-- **Smart Move (Fix Location)**: Per-item filesystem relocation for a library item not tracked in Sonarr/Radarr — one-item preview → execute via the restructurer, reusing franchise-root nesting, NFO writing, and orphan cleanup (`src/Web/Routes/SmartMove.py`) [implemented]
-- **Arr Post-Processor franchise nesting**: Sonarr/Radarr "Move to Library" nests movies under the franchise root (series group or PREQUEL walk), disambiguates a movie folder from a same-named TV season, backfills the root's year, writes the group NFO, and prunes the orphaned source folder [implemented]
-- **Watch Syncer**: Crunchyroll→AniList watch sync with status transitions (PLANNING → CURRENT → COMPLETED) [implemented]
-- **Crunchyroll Preview Runner**: Preview/approve/undo pipeline for CR sync [implemented]
-- **Download Manager**: Orchestrates AniList→Sonarr/Radarr add requests [implemented]
-- **Download Syncer**: Periodic AniList watchlist → Sonarr/Radarr auto-add [implemented]
-- **Plex Watch Syncer**: Plex↔AniList bidirectional watch sync with COMPLETED guard, circular sync fix, and undo log [implemented]
-- **Jellyfin Watch Syncer**: Jellyfin↔AniList bidirectional watch sync (same feature set as Plex) [implemented]
-- **Onboarding Wizard**: 4-step first-run setup wizard with service configuration [implemented]
-- **Floating Progress Widget**: In-page background task monitor polling `/api/progress` [implemented]
-
-### Design Patterns Used
-- **Pipeline Pattern**: Metadata Scanner uses scan → match → cache → apply pipeline
-- **Strategy Pattern**: Multiple fuzzy matching algorithms (ratio, partial ratio, token sort, token set) with configurable weights
-- **Observer Pattern**: Webhook handlers for real-time sync from Plex/Jellyfin
-- **Repository Pattern**: Database layer abstracts SQLite operations behind clean interfaces
-
-### Data Flow (Per Pillar)
-- **P2 (File Organization)**: User selects Plex library → Restructurer analyzes shows → matches to AniList → builds series groups → generates move plan → user previews → executes file moves → triggers Plex refresh
-- **P3 (Metadata)**: Scanner enumerates Plex shows → Title Matcher finds AniList entries → Series Group Builder walks relation graph → AniList metadata cached → metadata written to Plex (show + season level)
-- **P1 (Watch Sync)**: Scheduler triggers periodic sync → Crunchyroll watch history fetched → episodes matched to AniList entries → status updated per linked user (Plex/Jellyfin polling + webhooks planned)
-- **P4 (Downloads)**: User selects AniList entry → resolve to TVDB/TMDB IDs via NamingTranslator → MappingResolver persists AniList↔Arr mappings → DownloadManager sends add request to Sonarr/Radarr with alt titles
-
-See `ARCHITECTURE.md` for detailed per-pillar architecture.
-
-### Media Mapping Model
-- **Series Group**: Collection of AniList entries linked by SEQUEL/PREQUEL relations, sorted chronologically. Represents one logical "show."
-- **Season Mapping**: Each entry in a series group maps to a Plex season, using the entry's AniList title as the season display name.
-- **Season vs Cour**: A Roman numeral or `Nth Season` in an AniList title names the *season*; a bare `Part N` names a *cour within* that season. `parse_season_and_cour()` (`src/Matching/TitleMatcher.py`) is the single source of truth, used by both the CR season map and the restructurer. Crunchyroll numbers seasons the same way, so cours must share their parent's season number — numbering each cour separately mis-maps every later season. Episode numbers run continuously across a season's cours.
-- **CR Season Identity**: Crunchyroll's season *number* is not AniList's — it counts movies and separately-published arcs. The season *title* is the reliable key and takes precedence; see `season_from_cr_season_title()`.
-- **Structure Adaptation**: Scanner auto-detects three Plex file structures (split folders, multi-season, absolute numbering) and maps accordingly. See `ARCHITECTURE.md` Section 8 for details.
-
----
-
-## Development Workflow
-
-### Git Strategy
-- **Main Branch**: `main` (protected, production-ready)
-- **Branch Naming**: `feature/*`, `bugfix/*`, `hotfix/*`
-- **Commit Convention**: Descriptive imperative messages (e.g., "Add Plex webhook handler")
-
-#### Git Best Practices
-- **Always use `git pull --rebase`** (or alias `git pr`) to maintain linear history
-- Avoid merge commits when syncing with remote
-- If rebase conflicts occur: use `git rebase --abort` to undo, then resolve conflicts
-- Keep commits atomic and well-described
-
-### Code Review Process
-- Solo project — self-review before merging
-- CI checks must pass (lint, test, type check)
-
----
-
-## Testing Strategy
-
-### Test Framework
-- **Unit Tests**: pytest
-- **Integration Tests**: pytest with httpx test client
-- **Async Testing**: pytest-asyncio
-- **Test Coverage Goal**: 70% minimum on core logic (Matching, Sync, Scanner)
-
-### Testing Commands
 ```bash
-pytest                           # Run all tests
-pytest tests/Unit/               # Run unit tests only
-pytest tests/Integration/        # Run integration tests only
-pytest --cov=src                 # Run with coverage report
-pytest -x                        # Stop on first failure
+pip install -e ".[dev]"      # install (in a Python 3.12 venv)
+python -m src.Main           # run locally on http://localhost:9876
+pytest                       # test (774 pass)
+ruff check src/              # lint
+black --check src/           # format check. Run black src/ first, then ruff
+mypy src/                    # type check
+docker build -t anilist-link .                              # release image
+docker build --build-arg BUILD_VARIANT=dev -t anilist-link . # dev image with dev-tools
+docker compose up -d         # run the container
 ```
 
-### Testing Preferences
-- **TDD**: Optional — write tests after for new features
-- **Test Generation**: Collaborative — Claude writes tests, developer reviews
-- **Coverage Requirements**: Core matching and sync logic must have tests
-
----
-
-## Code Quality Standards
-
-### Linting & Formatting
-- **Linter**: Ruff
-- **Formatter**: Black
-- **Type Checker**: mypy
-- **Pre-commit Hooks**: Yes (pre-commit framework)
-
-### Commands
-```bash
-ruff check src/                  # Run linter
-ruff check --fix src/            # Auto-fix linting issues
-black src/                       # Format all files
-mypy src/                        # Type check
-```
-
-### Style Guidelines
-- **Indentation**: 4 spaces (Python standard)
-- **Line Length**: 88 characters (Black default)
-- **Naming Conventions**:
-  - Files & Directories: `PascalCase` (e.g., `AnilistClient.py`, `TitleMatcher.py`)
-  - Variables: `snake_case` (Python standard, e.g., `user_data`, `config_options`)
-  - Functions: `snake_case` (Python standard, e.g., `get_user_by_id`, `process_payment`)
-  - Classes: `PascalCase` (e.g., `AnilistClient`, `TitleMatcher`)
-  - Constants: `UPPER_SNAKE_CASE` (e.g., `MAX_RETRY_COUNT`, `API_BASE_URL`)
-  - Environment Variables: `UPPER_SNAKE_CASE` (e.g., `PUID`, `PGID`, `PLEX_URL`)
-- **File Naming**: `PascalCase` (e.g., `AnilistClient.py`, `MetadataScanner.py`)
-
-**Note**: While the template standard specifies PascalCase for variables and functions, this project follows Python PEP 8 conventions for variables (`snake_case`) and functions (`snake_case`), as this is the universal Python standard. PascalCase is used for file names, directory names, and class names per the template standard.
-
----
-
-## Environment Setup
-
-### Docker Volume Paths
-> Following Binhex standardization - all configuration, data, and media use consistent paths
-
-**Container Paths** (these are fixed in the container):
-- `/config` - Application configuration, SQLite database, and logs
-- `/data` - Application data (not heavily used for this project)
-
-**Host Paths** (customize these for your system):
-```bash
-# Example mappings
-/mnt/user/appdata/AnilistLink:/config    # Configuration, database, logs
-/mnt/user/data:/data                      # Application data
-```
-
-### Required Environment Variables
-Standard Binhex environment variables (set these in Docker Compose or docker run):
-- `PUID` - User ID for file ownership (e.g., `1000`)
-- `PGID` - Group ID for file ownership (e.g., `1000`)
-- `UMASK` - File permission mask (recommended: `002`)
-- `TZ` - Timezone (e.g., `America/New_York`)
-
-Application-specific variables:
-- `PLEX_URL` - Plex server URL (e.g., `http://192.168.1.100:32400`)
-- `PLEX_TOKEN` - Plex authentication token
-- `JELLYFIN_URL` - Jellyfin server URL (e.g., `http://192.168.1.100:8096`)
-- `JELLYFIN_API_KEY` - Jellyfin API key
-- `ANILIST_CLIENT_ID` - AniList OAuth2 application client ID
-- `ANILIST_CLIENT_SECRET` - AniList OAuth2 application client secret
-- `SONARR_URL` - Sonarr server URL (e.g., `http://192.168.1.100:8989`) [P4]
-- `SONARR_API_KEY` - Sonarr API key [P4]
-- `RADARR_URL` - Radarr server URL (e.g., `http://192.168.1.100:7878`) [P4]
-- `RADARR_API_KEY` - Radarr API key [P4]
-- `WATCHLIST_REFRESH_INTERVAL` - Minutes between scheduled AniList watchlist refreshes (default: `30`)
-
----
-
-## Database
-
-### Schema Overview (v1 — consolidated 1.0 baseline)
-Current tables (30):
-- `media_mappings` - Maps media server library items to AniList IDs with confidence scores, match method, and optional series group reference
-- `users` - Linked AniList accounts with OAuth tokens
-- `sync_state` - Per-user, per-item sync tracking (last synced episode, timestamp, status)
-- `anilist_cache` - Cached AniList metadata with 7-day TTL
-- `manual_overrides` - User-specified title-to-AniList-ID overrides
-- `cr_session_cache` - Crunchyroll auth session persistence (30-day TTL)
-- `app_settings` - GUI-managed configuration (encrypted secrets in DB)
-- `plex_media` - Persistent Plex library item snapshot
-- `series_groups` - Groups of AniList entries connected by SEQUEL/PREQUEL relations
-- `series_group_entries` - Individual entries within a series group, ordered chronologically
-- `restructure_log` - File move operation audit trail
-- `restructure_plans` - Saved restructure plans with summary and status
-- `jellyfin_media` - Persistent Jellyfin library item snapshot
-- `libraries` - Local library definitions (name, paths)
-- `library_items` - Items in a local library with match data
-- `plex_users` - Per-user Plex tokens for watch tracking
-- `jellyfin_users` - Per-user Jellyfin credentials
-- `cr_sync_preview` - Pending Crunchyroll sync changes awaiting approval
-- `cr_sync_log` - Applied CR sync changes with undo support
-- `watch_sync_log` - Plex/Jellyfin sync audit trail with undo support
-- `download_requests` - Sonarr/Radarr add request tracking
-- `anilist_sonarr_mapping` - AniList↔Sonarr series mappings
-- `anilist_radarr_mapping` - AniList↔Radarr movie mappings
-- `anilist_sonarr_season_mapping` - Per-season Sonarr series mappings
-- `anilist_arr_skip` - Entries skipped from auto-download
-- `sonarr_series_cache` - Cached Sonarr series data (by TVDB ID)
-- `radarr_movie_cache` - Cached Radarr movie data (by TMDB ID)
-- `user_watchlist` - Cached AniList watchlist per linked user
-- `cr_unmapped_episodes` - Crunchyroll history the sync could not place on AniList (unknown season / no results), with per-row resolve or dismiss
-
-**New `app_settings` keys (Rate Your Completed Shows / Glance integration)**: `anilist.score_format`, `anilist.score_format_updated_at`, `app.show_unrated_completed`, `glance.api_key` — no new tables, `user_watchlist.score` already existed.
-
-**New `app_settings` key (AniList availability)**: `anilist.health` — JSON snapshot of the current outage (`down_since`, `reason`, `detail`, `reduced_limit`) so a restart reports true downtime rather than resetting it. No new tables.
-
-### Migration Strategy
-- All tables and indexes defined in `src/Database/Models.py` (TABLES, INDEXES dicts)
-- v1 creates the complete schema baseline; v2-v5 are incremental patches (current version: 5)
-- Database auto-creates on first run if not present
-- Migrations run automatically at startup
-
-### Important Indexes/Constraints
-- `media_mappings`: Unique constraint on (source, source_id) to prevent duplicate mappings
-- `sync_state`: Composite index on (user_id, media_mapping_id) for fast per-user lookups
-- `anilist_cache`: Index on expires_at for efficient TTL cleanup
-
----
-
-## API Documentation
-
-- **Location**: Auto-generated at `http://localhost:9876/docs` (FastAPI OpenAPI)
-- **Authentication**: AniList OAuth2 for user-facing operations; no auth for local dashboard
-- **Rate Limiting**: AniList enforces 90 requests/minute; proactive throttling implemented
-- **Key Endpoints**:
-  - `GET /` - Dashboard home page
-  - `GET /api/status` - System status and sync statistics
-  - `GET /api/progress` - Background task progress (floating widget)
-  - `GET /api/anilist/status` - AniList API availability for the status banner (state, reason, downtime, next probe)
-  - `POST /api/anilist/check-now` - Probe AniList immediately instead of waiting for the hourly timer
-  - `GET /api/fs/browse` - File system browser for restructure/onboarding
-  - `GET /settings` - GUI configuration page
-  - `GET /onboarding` - First-run setup wizard
-  - `POST /api/test/{service}` - Connection test endpoints (plex, jellyfin, anilist, etc.)
-  - `POST /api/sync` - Trigger manual Crunchyroll watch sync
-  - `GET /auth/anilist` - Initiate AniList OAuth2 flow
-  - `GET /auth/anilist/callback` - AniList OAuth2 callback handler
-  - `GET /plex` - Plex library browser with mapping management
-  - `GET /jellyfin` - Jellyfin library browser with mapping management
-  - `POST /plex/scan/preview`, `POST /plex/scan/live` - Plex scan modes
-  - `POST /scan/jellyfin/preview`, `POST /scan/jellyfin/live` - Jellyfin scan modes
-  - `POST /plex/apply-all` - Apply AniList metadata to all matched Plex items
-  - `GET /library/{id}` - Unified library detail view
-  - `GET /restructure` - File restructure wizard
-  - `POST /onboarding/restructure/analyze` - Shared restructure analysis endpoint
-  - `POST /restructure/execute` - Execute approved file moves
-  - `GET /crunchyroll` - Crunchyroll sync page with preview/history/undo
-  - `GET /downloads` - Download manager UI
-  - `GET /manual-grab` - Manual release grab
-  - `GET /watchlist` - AniList watchlist browser
-  - `POST /api/watchlist/rate` - Submit a score for a watchlist entry (AniList + local cache)
-  - `POST /api/library/add-to-arr` - Add an AniList entry to Sonarr/Radarr; returns `needs_disambiguation` (with candidates) when TVDB/TMDB can't be auto-resolved so the UI can show a picker overlay
-  - `GET /api/watchlist/sonarr-lookup`, `GET /api/watchlist/radarr-lookup` - Title search against Sonarr/Radarr for the disambiguation picker
-  - `GET /api/watchlist/resolve-stream` - SSE resolve preview (walks TVDB link → prequel chain → title search)
-  - `POST /api/smart-move/preview`, `POST /api/smart-move/execute` - Filesystem "Fix Location" for a single library item **not** managed by Sonarr/Radarr; reuses the restructurer (franchise-root nesting, NFO, orphan cleanup) to relocate one on-disk folder
-  - `GET /glance/rate-completed` - Key-gated iframe page for the Glance "Rate Your Completed Shows" widget
-  - `POST /glance/rate-completed/submit` - Key-gated rating submission from the Glance widget
-  - `POST /api/crunchyroll/unmapped/{id}/map` - Write a dropped CR season's progress to a chosen AniList entry (audited in `cr_sync_log`, so undoable)
-  - `POST /api/crunchyroll/unmapped/{id}/dismiss` - Close an unmapped report without touching AniList
-  - `POST /api/crunchyroll/repair/scan` - Compare the latest preview run against sync history and report writes that landed on the wrong entry of a series group
-  - `POST /arr-webhook` - Sonarr/Radarr webhook receiver
-  - `POST /jellyfin/webhook` - Jellyfin webhook receiver (virtual season cleanup on TaskCompleted)
-  - `GET /api/jellyfin/virtual-items` - Inspect virtual seasons (diagnostic)
-  - `GET /api/jellyfin/delete-virtual` - Delete a single virtual item (diagnostic)
-  - `GET /tools` - Admin tools
-  - `GET /api/scan/plex/search` - AniList title search for manual rematch
-
----
-
-## Background Jobs
-
-### Job System: APScheduler
-
-#### Key Job Categories
-- **Crunchyroll Watch Sync**: Periodic Crunchyroll→AniList watch sync [implemented]
-- **Plex Metadata Scan**: Periodic scan of Plex libraries, matching to AniList, metadata application [triggered manually via UI]
-- **Jellyfin Metadata Scan**: Periodic scan of Jellyfin libraries [triggered manually via UI]
-- **Download Sync**: Periodic AniList watchlist → Sonarr/Radarr auto-add [implemented]
-- **Watchlist Refresh**: Periodic refresh of `user_watchlist` cache from AniList for all linked users [implemented]
-- **Plex Watch Sync**: Periodic Plex↔AniList watch sync [implemented — default disabled]
-- **Jellyfin Watch Sync**: Periodic Jellyfin↔AniList watch sync [implemented — default disabled]
-
-#### Important Job Classes
-- `crunchyroll_sync` - Scheduled Crunchyroll watch sync at configurable interval [implemented]
-- `download_sync` - Periodic AniList watchlist → Sonarr/Radarr sync [implemented]
-- `watchlist_refresh` - Refreshes `user_watchlist` for all linked AniList users; every 30 min, on startup, and post-CR-sync [implemented]
-- `plex_metadata_scan` - Plex library scan and metadata application [planned for scheduling]
-- `plex_watch_sync` - Plex watch progress polling [implemented — default disabled]
-- `jellyfin_watch_sync` - Jellyfin watch progress polling [implemented — default disabled]
-- `jellyfin_virtual_cleanup` - Polls Jellyfin scan task state every 60s; runs virtual season cleanup on Running→Idle transition [implemented]
-- `anilist_health_monitor` - asyncio loop (not APScheduler); idle while AniList is healthy, probes for recovery during an outage and persists state transitions [implemented]
-
----
-
-## Docker Configuration
-
-### Images Used
-- **Base Image**: `python:3.11-alpine` (minimal Python image)
-- **Multi-stage Builds**: Yes — build dependencies in first stage, slim runtime in second
-
-### Binhex-Style Standardization
-> Following Binhex's container conventions for consistency across all Docker images
-
-#### Standard Volume Mappings
-- **`/config`** - Configuration files, SQLite database, supervisord logs
-  - Contains `supervisord.log` for container process logging
-  - Contains `anilist_link.db` SQLite database
-  - Example host mapping: `/mnt/user/appdata/AnilistLink:/config`
-
-- **`/data`** - Application data (reserved for future use)
-  - Example host mapping: `/mnt/user/data:/data`
-
-#### Standard Environment Variables
-All containers support these consistent environment variables:
-
-**User/Group Management:**
-- `PUID` - Process User ID (default: `99`)
-- `PGID` - Process Group ID (default: `100`)
-- `UMASK` - File creation permission mask (default: `000`, recommended: `002`)
-
-**System Configuration:**
-- `TZ` - Timezone (e.g., `America/New_York`)
-- `DEBUG` - Enable debug logging (`true`/`false`, default: `false`)
-
-**Application-Specific Variables:**
-- `PLEX_URL` - Plex server URL
-- `PLEX_TOKEN` - Plex authentication token
-- `JELLYFIN_URL` - Jellyfin server URL
-- `JELLYFIN_API_KEY` - Jellyfin API key
-- `ANILIST_CLIENT_ID` - AniList OAuth2 client ID
-- `ANILIST_CLIENT_SECRET` - AniList OAuth2 client secret
-- `SONARR_URL` - Sonarr server URL [P4]
-- `SONARR_API_KEY` - Sonarr API key [P4]
-- `RADARR_URL` - Radarr server URL [P4]
-- `RADARR_API_KEY` - Radarr API key [P4]
-
-#### Standard Logging
-- **Process Manager**: Supervisord (manages all container processes)
-- **Main Log Location**: `/config/supervisord.log`
-- Application logs also write to `/config/logs/anilist_link.log`
-
-#### Example Docker Compose Configuration
-```yaml
-services:
-  AnilistLink:
-    image: dogberttech/anilist-link:latest
-    container_name: AnilistLink
-    restart: unless-stopped
-    volumes:
-      - /mnt/user/appdata/AnilistLink:/config
-      - /mnt/user/data:/data
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - UMASK=002
-      - TZ=America/New_York
-      - DEBUG=false
-      - PLEX_URL=http://192.168.1.100:32400
-      - PLEX_TOKEN=your-plex-token
-      - JELLYFIN_URL=http://192.168.1.100:8096
-      - JELLYFIN_API_KEY=your-jellyfin-api-key
-      - ANILIST_CLIENT_ID=your-anilist-client-id
-      - ANILIST_CLIENT_SECRET=your-anilist-client-secret
-    ports:
-      - 9876:9876
-```
-
-### Optimization Notes
-> These are applied in our Dockerfiles
-- Using minimal base images (python:3.11-alpine)
-- Layer caching optimized (dependencies before code)
-- `.dockerignore` configured to exclude unnecessary files
-- Combined RUN commands to reduce layers
-- Multi-stage builds to minimize final image size
-
-### Docker Commands
-```bash
-docker pull dogberttech/anilist-link:latest       # Pull latest image
-docker build -t dogberttech/anilist-link:latest . # Build image locally (dev)
-docker-compose up -d                              # Run container
-docker logs AnilistLink                           # View container logs
-docker exec -it AnilistLink cat /config/supervisord.log  # View detailed logs
-docker-compose down                               # Stop container
-```
-
----
-
-## Coding Conventions
-
-### General Principles
-1. **Async-first**: Use async/await for all I/O operations (API calls, database, file I/O)
-2. **Keep functions focused**: Each function should do one thing well
-3. **Type hints everywhere**: All function signatures must include type annotations
-
-### Project-Specific Rules
-1. **All external API calls go through Client classes**: Never make raw HTTP requests outside of `src/Clients/`
-2. **All database access goes through the Database layer**: Never import sqlite3/aiosqlite outside of `src/Database/`
-3. **Configuration via environment variables**: Use `src/Utils/Config.py` for all config access, never read env vars directly in business logic
-
-### Error Handling
-- Use specific exception classes for different failure modes (e.g., `RateLimitError`, `AuthenticationError`)
-- Log errors with context (which client, which operation, which item)
-- Never silently swallow exceptions — at minimum, log them
-- Graceful degradation: if one platform fails, others should continue operating
-
-### Performance Considerations
-- Respect AniList rate limits (90 req/min) — use proactive throttling
-- Cache AniList API responses with TTL to reduce redundant calls
-- Use incremental rescans (only process items changed since last scan)
-- Batch database operations where possible
-
----
-
-## Security & Privacy
-
-### Security Best Practices
-1. **Never log OAuth tokens or API keys** — mask them in log output
-2. **Validate all user input** from the web dashboard before processing
-3. **Use parameterized queries** for all SQLite operations (prevent SQL injection)
-
-### Authentication/Authorization
-- AniList OAuth2 flow for user account linking (each user gets their own token)
-- Plex token authentication for server access
-- Jellyfin API key for server access
-- Web dashboard is local-only (no built-in auth — relies on network-level access control)
-
-### Data Privacy
-- OAuth tokens stored locally in SQLite database
-- No data sent to external services other than the configured platforms
-- Users can unlink their accounts and delete their tokens via the dashboard
-
----
-
-## Common Tasks
-
-### Adding a New Feature
-1. Create or modify files in the appropriate `src/` subdirectory
-2. Update `docs/ARCHITECTURE.md` if the change affects system design
-3. Write tests in `tests/Unit/` or `tests/Integration/`
-4. Run `ruff check src/` and `mypy src/` before committing
-5. Update this file if new conventions or patterns are introduced
-
-### Debugging
-- **Logs Location**: `/config/logs/anilist_link.log` (application) and `/config/supervisord.log` (container)
-- **Debug Mode**: Set `DEBUG=true` environment variable for verbose logging
-- **Common Issues**: See [QUICK-REFERENCE.md](QUICK-REFERENCE.md) troubleshooting section
-
-### Database Changes
-1. Add migration logic to `src/Database/Migrations.py`
-2. Update `src/Database/Models.py` with new/changed table definitions
-3. Test migration on a copy of the database before applying
-4. Migrations auto-run on container startup
-
----
-
-## Custom Commands & Aliases
-
-### Shell Aliases (for developers)
-```bash
-alias alrun='docker-compose up -d'           # Start Anilist-Link
-alias allogs='docker logs -f AnilistLink'    # Follow container logs
-alias alstop='docker-compose down'           # Stop Anilist-Link
-```
-
----
-
-## Deployment
-
-### Environments
-- **Development**: Local Python venv or Docker container, SQLite in project directory
-- **Production**: Docker container on Unraid/Docker host, SQLite in mounted `/config` volume
-
-### Deployment Process
-1. Pull the published image: `docker pull dogberttech/anilist-link:latest`
-2. Update `docker-compose.yml` with correct environment variables
-3. Deploy: `docker-compose up -d`
-4. Verify: Check `http://localhost:9876` for dashboard
-
-### CI/CD Pipeline
-- GitHub Actions runs on push and pull request
-- Automated checks: Ruff lint, mypy type check, pytest test suite
-- Docker image build verification
-
----
-
-## Monitoring & Logging
-
-### Application Monitoring
-- **Dashboard**: Built-in web dashboard at `http://localhost:9876`
-- **Key Metrics**: Sync status per user, mapping success rate, last scan timestamp, AniList API rate limit usage
-
-### Logging Strategy
-- **Log Levels**: DEBUG (verbose), INFO (normal operations), WARNING (non-critical issues), ERROR (failures)
-- **Log Location**: `/config/logs/anilist_link.log` (application), `/config/supervisord.log` (container process)
-- **Retention**: Log rotation configured to prevent unbounded growth
-
----
-
-## Dependencies & Updates
-
-### Dependency Management
-- **Update Frequency**: Monthly or as needed for security patches
-- **Security Updates**: Monitor via GitHub Dependabot
-- **Major Version Updates**: Test in development before deploying
-
-### Important Version Constraints
-- Python >= 3.11 (required for modern async features and type syntax)
-- FastAPI >= 0.100 (for modern Pydantic v2 support)
-- rapidfuzz >= 3.0 (for current API compatibility)
-
----
-
-## Known Issues & Gotchas
-
-### Common Pitfalls
-1. **AniList rate limiting**: Exceeding 90 req/min triggers 429 responses with exponential backoff. Always use the throttled client.
-2. **AniList outages**: AniList disables its public API from time to time (403 "temporarily disabled") and sometimes runs with a reduced limit. Never add a retry loop of your own around an AniList call — the client's circuit breaker raises `AniListUnavailableError` immediately while the API is down, and any new batch loop over AniList calls should check `anilist_client.health.is_down` and stop.
-3. **Season maps and cours**: never renumber a franchise's season slots per cour — Crunchyroll's season numbers follow AniList's `Nth Season` labels, and shifting them breaks every later season. `tests/Unit/test_cr_season_mapping.py` pins Mushoku Tensei and Re:Zero together for exactly this reason; a change that fixes one by renumbering breaks the other.
-4. **Crunchyroll season numbers drift from AniList's**: CR's season index counts everything it lists for a franchise, including movies and arcs AniList publishes separately, so the numbers are *not* interchangeable — CR reports 7 seasons for Demon Slayer against AniList's 5 TV entries, making CR season 5 AniList season 4. Prefer the CR **season title**: its arc names line up with AniList's English titles, and `season_from_cr_season_title()` overrides the number when one season matches near-exactly and unambiguously. The 0.95 threshold is deliberate — the scorer floors substring-containment pairs at 0.90, so anything lower would fold a movie arc absent from the TV map (Infinity Castle) onto season 1.
-5. **Crunchyroll episode numbering**: CR reports either per-season or franchise-absolute episode numbers, and the only signal is whether the number exceeds the season's length. That test alone is not enough — an absolute reading that resolves to a season *earlier* than the one CR reported disproves itself and must be rejected. Also: CR history is newest-first and paginated, so a series can straddle a page boundary; group the highest episode per (series, season) at **run** level, never per page, or a later page's lower episode produces a second, lower proposal.
-6. **Crunchyroll API instability**: The reverse-engineered API may break without notice. Check `_resources/Research/` for latest findings.
-7. **Plex multi-user tokens**: Per-user tracking requires obtaining individual tokens via Plex.tv API, not just the server admin token.
-
-### Technical Debt
-**P2 — File Organization**: ✅ Complete
-- All 3 operation levels implemented: folder rename (L1), folder+file rename (L2), full restructure (L3)
-- Wizard UI with shared file browser and naming template modules, analyze, execute, and auto-rescan all working
-- Multi-source restructure with conflict detection and resolution
-
-**P3 — Metadata**: ✅ Complete (Plex + Jellyfin)
-- MetadataScanner (Plex) and JellyfinMetadataScanner, PlexClient + JellyfinClient metadata writing, structure A/B/C detection, series groups all working
-- Manual overrides UI at `/mappings` (list, add, delete)
-- Deferred (non-blocking): staff/credits writing to Plex, GUID-based high-confidence matching
-
-**P1 — Watch Sync**: Crunchyroll, Plex, and Jellyfin all implemented
-- Crunchyroll→AniList sync with preview/approve/undo pipeline (CrunchyrollPreviewRunner) ✅
-- PlexWatchSyncer and JellyfinWatchSyncer — bidirectional sync (polling) ✅
-- Enable/disable toggles per source, default disabled (`plex.watch_sync_enabled`, `jellyfin.watch_sync_enabled`) ✅
-- COMPLETED status protection: never downgrades AniList entries already marked COMPLETED ✅
-- Circular sync fix: backfill always writes `sync_state` to prevent false forward-sync updates ✅
-- `watch_sync_log` table: full audit trail with per-entry undo from the Watch Sync UI ✅
-- Jellyfin webhook handler (`POST /jellyfin/webhook`) ✅ — receives events from Webhook plugin
-- Jellyfin virtual season cleanup ✅ — automated post-scan + 60s poller + webhook trigger
-- Plex webhook handler (real-time sync) not yet implemented
-- AniList token auto-refresh not yet wired up
-
-**P4 — Downloads**: ✅ Complete
-- SonarrClient, RadarrClient, DownloadManager, MappingResolver, ArrPostProcessor, DownloadSyncer all implemented
-- Download management UI, manual grab, watchlist browser, Sonarr sync, webhook receiver all working
-- Post-processor: naming templates, series groups, season mappings, file renaming, Sonarr path sync + rescan
-- Webhook auto-registration (schema-based), SSE resolve with live progress, S1 title variants for sequel search
-- Full automation (auto-search on new CURRENT status) partial — DownloadSyncer exists
-- Disambiguation overlay for both Sonarr (TVDB) and Radarr (TMDB) when an entry can't be auto-resolved — user picks the correct match
-- Movie handling: franchise-root nesting, movie-vs-TV-season folder disambiguation, year backfill, group NFO, and orphaned-source cleanup on every arr move
-- Smart Move ("Fix Location") for on-disk library items *arr doesn't manage a file for (e.g. a movie whose file came from elsewhere but shares a Sonarr series with the TV seasons)
-
-**General**:
-- Crunchyroll client needs ongoing maintenance as the unofficial API changes
-
----
-
-## Resources & References
-
-- **Repository**: https://github.com/Mprice12337/Anilist-Link
-- **Existing Codebase to Merge**: https://github.com/Mprice12337/Crunchyroll-Anilist-Sync
-- **AniList API Docs**: https://anilist.gitbook.io/anilist-apiv2-docs
-- **Plex API**: https://github.com/Arcanemagus/plex-api/wiki
-- **Jellyfin API**: https://api.jellyfin.org/
-- **Sonarr API**: https://sonarr.tv/docs/api/
-- **Radarr API**: https://radarr.video/docs/api/
-- **rapidfuzz Docs**: https://rapidfuzz.github.io/RapidFuzz/
-
----
-
-## Quick Reference
-
-### Most Common Commands
-```bash
-# Development
-python -m src.Main                               # Run locally
-uvicorn src.Web.App:app --reload --port 9876     # Run with hot reload
-
-# Testing
-pytest                                            # Run all tests
-pytest tests/Unit/                                # Run unit tests
-pytest --cov=src                                  # Run with coverage
-
-# Code Quality
-ruff check src/                                   # Lint
-black src/                                        # Format
-mypy src/                                         # Type check
-
-# Docker
-docker-compose up -d                              # Start containers
-docker-compose down                               # Stop containers
-docker logs AnilistLink                           # View container logs
-docker exec -it AnilistLink cat /config/supervisord.log  # View detailed process logs
-docker ps                                         # List running containers
-```
-
-### File Locations
-- Config: `/config` (in container) - Maps to host path defined in docker-compose
-- Logs: `/config/supervisord.log` (main container log)
-- Application Logs: `/config/logs/anilist_link.log`
-- Database: `/config/anilist_link.db`
-- Tests: `tests/`
-- **Documentation**: `/docs` folder (all docs except README.md)
-- **ARCHITECTURE.md**: `/docs/ARCHITECTURE.md` (required)
-- **CLAUDE.md**: `/docs/CLAUDE.md` (symlinked to root)
-- **Reference Materials**: `/_resources` (NOT in git - for dev use only)
-
-### Troubleshooting Docker Permission Issues
-```bash
-# Check current PUID/PGID
-docker exec AnilistLink id
-
-# View file ownership in container
-docker exec AnilistLink ls -la /config
-
-# Fix permissions on host (if needed)
-sudo chown -R 1000:1000 /mnt/user/appdata/AnilistLink
-sudo chmod -R 775 /mnt/user/appdata/AnilistLink
-```
-
----
-
-## MCP Servers (if applicable)
-
-> Claude Code can use MCP servers to extend capabilities
-
-### Configured Servers
-- **Playwright MCP**: Browser automation for testing the web dashboard UI and OAuth flows
-
-### Usage Notes
-- Use Playwright MCP for visual testing of the dashboard at `http://localhost:9876`
-- Not required for core development — primarily useful for E2E testing of the web interface
-
----
-
-## Notes for Maintaining This File
-
-**When to Update**:
-- Major architectural changes (also update ARCHITECTURE.md)
-- New development workflows
-- Security policy changes
-- New dependencies or technology additions
-- Project structure changes
-
-**What Not to Include**:
-- Frequently changing data (current sprint goals)
-- Duplicate information from README
-- Overly detailed API specs (link instead)
-- Temporary development notes (use `_resources/` instead)
-
-**Tips**:
-- Keep explanations concise but complete
-- Use examples for complex concepts
-- Update when Claude repeatedly makes the same mistakes
-- Store draft updates in `_resources/` before committing to docs
-- Keep ARCHITECTURE.md in sync with this file
+`src/Web/App.py` has no module-level `app`. `create_app()` needs the config, the
+database, the AniList client and the scheduler, so start the app through `src.Main`.
+
+## Conventions
+
+**Naming**: files, directories and classes are PascalCase (`AnilistClient.py`,
+`TitleMatcher`). Functions and variables are `snake_case`, because PEP 8 binds them and
+every Python tool expects it. Test files are `test_*.py`, because pytest finds them by
+that pattern. Constants and environment variables are `UPPER_SNAKE_CASE`. Settings keys
+in `app_settings` are dotted `snake_case` (`plex.watch_sync_enabled`).
+
+**Errors**: raise a specific exception class (`AniListUnavailableError`,
+`SeriesAlreadyExistsError`), and log it with the client, the operation and the item. Never
+swallow an exception. If one platform fails, the others continue.
+
+**Project-specific rules**:
+- All external HTTP calls go through a class in `src/Clients/`. No raw requests
+  anywhere else.
+- Only `src/Database/` imports `sqlite3` or `aiosqlite`. Use parameterized queries.
+- Read configuration through `src/Utils/Config.py`. Business logic never reads an
+  environment variable. The priority is environment variable, then the database
+  setting, then the code default.
+- Async for all I/O. Type hints on every function signature.
+- A schema change is a new numbered migration in `src/Database/Migrations.py` plus the
+  table change in `src/Database/Models.py`. The schema is at version 5, with 29 tables
+  plus `schema_version`. Migrations run at startup.
+- Never log an OAuth token or an API key.
+
+## How to work here
+
+**Plan mode** for anything beyond a single-file edit: a refactor, a schema change,
+anything touching Docker or CI. Show the plan and wait for a yes.
+
+**A subagent** for work that parallelizes — a research spike, reading a long reference,
+an independent audit. The main thread integrates the result.
+
+**Ask early.** An architecture question answered before the work costs a minute. The
+same question answered after costs the work.
+
+Standing rules for this repo: rebase, never merge. `_resources/` never enters git. CI
+green before merge. Work lands on `dev`, and `dev` goes to `main` through a pull
+request.
+
+## The phase loop
+
+Each phase of the build runs the same five steps.
+
+1. `/resume-session` — restore the state the last phase left
+2. Build. Name `tdd-workflow` only for a bug fix, where the test is the reproducer
+3. `verification-loop` — the gate at the end of the phase
+4. Review in parallel: `code-reviewer`, `security-reviewer` and `python-reviewer`
+5. `/learn-eval`, then `/save-session`
+
+Commit at the end of every phase. A local commit costs nothing and gives the review a
+diff to read.
+
+`blueprint` holds the phase plan between sessions. Each step in it carries a brief that a
+fresh session can execute cold.
+
+## Docker
+
+Volumes, environment variables and ports are in `docs/QUICK-REFERENCE.md`. Read that
+file rather than repeating it here.
+
+What is true of this project and not of every Binhex container:
+
+- The base image is `python:3.11-slim-bookworm`, not Alpine. Crunchyroll auth needs
+  Chromium and chromedriver, and the Debian base keeps them compatible.
+- There is no supervisord. `scripts/dev-tools/entrypoint.sh` applies `PUID`, `PGID`,
+  `UMASK` and `TZ`, then starts the app as `PUID:PGID` through `gosu`.
+- `BUILD_VARIANT=dev` adds the scripts in `scripts/dev-tools/` and `sqlite3`. The
+  entrypoint copies the scripts to `/config/dev-tools/`.
+- The media library and the import folder mount under `/media`. Sonarr and Radarr must
+  see files that the app writes as the same `PUID:PGID` owner.
+- Compose sets `shm_size: "2g"` for Chromium. Without Crunchyroll, `512m` is enough.
+
+First place to look when the container misbehaves: `docker logs AnilistLink`, then
+`/config/logs/anilist_link.log`. Set `DEBUG=true` for verbose logs.
+
+## Gotchas
+
+- **Season vs cour.** A Roman numeral or `Nth Season` in an AniList title names the
+  season. A bare `Part N` or `Cour N` names a cour inside that season.
+  `parse_season_and_cour()` in `src/Matching/TitleMatcher.py` is the single source of
+  truth for the Crunchyroll season map and the restructurer. Cours share the season
+  number of their parent, and episode numbers run on across the cours of a season. If
+  you number each cour as its own season, every later season maps wrong.
+  `tests/Unit/test_cr_season_mapping.py` pins Mushoku Tensei and Re:Zero together, so a
+  fix that renumbers one breaks the other.
+- **Crunchyroll season identity is the title, not the number.** Crunchyroll counts
+  movies and arcs that AniList publishes as separate entries, so its season numbers
+  drift. Demon Slayer has 7 Crunchyroll seasons against 5 AniList TV entries.
+  `season_from_cr_season_title()` overrides the number when one season title matches
+  near-exactly. The 0.95 threshold is deliberate. The scorer gives any substring pair
+  0.90, so a lower threshold folds a movie arc (Infinity Castle) onto season 1.
+- **Crunchyroll episode numbers** are per-season or franchise-absolute. An absolute
+  reading that resolves to a season earlier than the reported one is wrong, so reject
+  it. History is newest-first and paginated. Track the highest episode for each
+  (series, season) across the whole run, never for each page.
+- **The Crunchyroll API is reverse-engineered.** It can break without notice. Look in
+  `_resources/Research/` for the latest findings.
+- **AniList rate limit and outages.** AniList allows 90 requests a minute, and the
+  client throttles with a token bucket. AniList sometimes disables its API (403
+  "temporarily disabled") or cuts the limit. The circuit breaker in
+  `src/Clients/AnilistHealth.py` then raises `AniListUnavailableError` at once. Do not
+  write your own retry loop around an AniList call. A new batch loop over AniList calls
+  must check `anilist_client.health.is_down` and stop.
+- **Plex multi-user tokens.** The server admin token cannot track watch state for each
+  user. Each user needs a token from the Plex.tv API (`plex_users` table).
+- **Jellyfin NFO writer and LockData.** If the Jellyfin NFO saver is on, Jellyfin
+  overwrites our NFO data. If LockData is set on a series or season, our changes do not
+  propagate. Turn off the NFO saver, clear the locks, then do a "Replace all metadata"
+  rescan.
+- **Jellyfin virtual seasons** come back after `DELETE /Items/{id}` returns 204,
+  because the refresh queue recreates them. Stop the scan task first
+  (`JellyfinClient._stop_scan_task()`), then delete.
+- **Jellyfin images.** Items in a mixed library are `Type=Movie`. An item fetch must
+  request `ParentId` and `IsFolder` in `Fields`, or the hierarchy walk cannot find the
+  show folder. Call `_refresh_item_images` only after a `folder.jpg` write, never after
+  `RemoteImages/Download`.
+
+## Where the rules live
+
+The Plum Solutions standards — naming, Binhex Docker layout, documentation rules, git
+workflow — are in the `plum-standards` skill, not copied here. A copy in every repo is a
+copy that goes stale.
+
+This file holds only what is true of **this** project. Endpoints are in
+`docs/QUICK-REFERENCE.md` and in the FastAPI docs at `http://localhost:9876/docs`.
+Open work is in `docs/TODO.md`.
