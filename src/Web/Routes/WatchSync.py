@@ -409,6 +409,7 @@ async def watch_sync_page(request: Request):  # type: ignore[return]
     title_display = await db.get_setting("app.title_display") or "romaji"
 
     return templates.TemplateResponse(
+        request,
         "watch_sync.html",
         {
             "request": request,

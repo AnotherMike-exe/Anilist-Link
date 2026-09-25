@@ -47,6 +47,7 @@ async def grab_page(request: Request, anilist_id: int) -> HTMLResponse:
             cover_image = cached.get("cover_image", "")
 
     return templates.TemplateResponse(
+        request,
         "manual_grab.html",
         {
             "request": request,

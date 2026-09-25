@@ -69,6 +69,7 @@ async def jellyfin_library_page(request: Request) -> HTMLResponse:
     error = request.query_params.get("error") or ""
 
     return templates.TemplateResponse(
+        request,
         "jellyfin_library.html",
         {
             "request": request,
@@ -589,6 +590,7 @@ async def jellyfin_scan_progress_page(request: Request) -> HTMLResponse:
     """Render the scan progress page."""
     templates = request.app.state.templates
     return templates.TemplateResponse(
+        request,
         "scan_progress.html",
         {
             "request": request,
@@ -619,6 +621,7 @@ async def jellyfin_scan_results_page(request: Request) -> Response:
     failed_items = [i for i in results.items if i.status == "failed"]
 
     return templates.TemplateResponse(
+        request,
         "scan_preview.html",
         {
             "request": request,

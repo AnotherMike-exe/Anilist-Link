@@ -91,6 +91,7 @@ class DownloadSyncer:
             anilist_client=self._anilist,
             sonarr_client=sonarr_client,
             radarr_client=radarr_client,
+            config=self._config,
         )
 
         # Determine root folders and quality profiles
@@ -142,6 +143,13 @@ class DownloadSyncer:
             entries = await self._db.get_watchlist(user_id, list_statuses=auto_statuses)
 
             for entry in entries:
+                if self._anilist.health.is_down:
+                    logger.warning(
+                        "Download auto-sync halted — AniList API unavailable (%s)",
+                        self._anilist.health.reason,
+                    )
+                    break
+
                 entry_anilist_id: int = entry["anilist_id"]
                 anilist_format: str = entry.get("anilist_format", "") or ""
                 title: str = entry.get("anilist_title", "") or ""

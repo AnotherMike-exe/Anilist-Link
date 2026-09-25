@@ -1,0 +1,56 @@
+name: Review
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Lint, types and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check src/
+      - name: Format check
+        run: black --check src/
+      - name: Type check
+        run: mypy src/
+      # tests/ holds Unit and Integration suites. Both run headless, so both run here.
+      - name: Tests
+        run: pytest --cov=src
+
+  claude-review:
+    name: Claude review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    # A secret cannot appear in an `if`, so the step reads it through env.
+    # Forks and repos without the secret skip the review and stay green.
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        if: env.ANTHROPIC_API_KEY != ''
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: >-
+            Review this pull request for correctness, security and adherence to
+            the conventions in docs/CLAUDE.md. Comment only on real problems.

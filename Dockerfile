@@ -6,21 +6,30 @@ FROM python:3.11-slim-bookworm AS buildstage
 
 WORKDIR /app
 
-# Dependencies first (layer caching)
-COPY pyproject.toml ./
+# Dependencies first (layer caching). pyproject.toml reads the version from
+# src/Utils/Version.py and declares LICENSE, so the build needs both.
+COPY pyproject.toml LICENSE ./
+COPY src/Utils/Version.py ./src/Utils/Version.py
 RUN pip install --no-cache-dir .
 
 # ---- Final stage ----
 FROM python:3.11-slim-bookworm
 
+LABEL org.opencontainers.image.source="https://github.com/AnotherMike-exe/Anilist-Link" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.description="Self-hosted bridge between AniList and Plex, Jellyfin, Crunchyroll, Sonarr and Radarr."
+
 WORKDIR /app
 
 # Install Chromium and chromedriver for Crunchyroll Selenium auth.
+# tzdata provides /usr/share/zoneinfo so the TZ variable resolves to a real
+# zone; without it TZ is ignored and every timestamp renders as UTC.
 # gosu lets the entrypoint drop from root to PUID:PGID so files written into
 # the media library are owned by the same user as Sonarr/Radarr (not root).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium chromium-driver \
     gosu \
+    tzdata \
     fonts-liberation \
     libnss3 \
     libxss1 \
@@ -43,7 +52,7 @@ VOLUME ["/config", "/data"]
 # Binhex standard environment variables with defaults
 ENV PUID=99 \
     PGID=100 \
-    UMASK=000 \
+    UMASK=002 \
     TZ=UTC \
     DEBUG=false \
     CHROME_BIN=/usr/bin/chromium \

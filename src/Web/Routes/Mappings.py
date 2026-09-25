@@ -26,6 +26,7 @@ async def mappings_page(request: Request) -> Response:
     overrides = await db.get_all_overrides()
 
     return templates.TemplateResponse(
+        request,
         "mappings.html",
         {
             "request": request,

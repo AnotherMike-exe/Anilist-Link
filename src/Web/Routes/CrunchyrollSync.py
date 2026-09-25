@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -13,6 +15,7 @@ from src.Sync.CrunchyrollPreviewRunner import (
     CrunchyrollPreviewProgress,
     CrunchyrollPreviewRunner,
 )
+from src.Sync.CrunchyrollRepair import CorrectTarget, find_suspect_writes
 from src.Utils.Config import load_config_from_db_settings
 from src.Web.App import spawn_background_task
 
@@ -40,6 +43,7 @@ async def crunchyroll_hub(
     active_run_id = run_id
     runs: list[dict] = []
     log_entries: list[dict] = []
+    unmapped: list[dict] = []
     latest_sync_run_id = ""
 
     if user:
@@ -51,6 +55,7 @@ async def crunchyroll_hub(
         log_entries = await db.get_cr_sync_log(user_id=user["user_id"], limit=500)
         if log_entries:
             latest_sync_run_id = log_entries[0]["sync_run_id"]
+        unmapped = await db.get_cr_unmapped(user_id=user["user_id"])
 
     # Enrich history entries — anilist_cache first, user_watchlist fallback
     # (CR-synced entries often aren't in anilist_cache since the preview
@@ -97,6 +102,7 @@ async def crunchyroll_hub(
     title_display = await db.get_setting("app.title_display") or "romaji"
 
     return templates.TemplateResponse(
+        request,
         "crunchyroll.html",
         {
             "request": request,
@@ -104,11 +110,11 @@ async def crunchyroll_hub(
             "run_id": active_run_id,
             "runs": runs,
             "log_entries": enriched_log,
+            "unmapped": unmapped,
             "latest_sync_run_id": latest_sync_run_id,
             "user": user,
             "active_tab": tab,
             "title_display": title_display,
-            "version": "0.1.0",
         },
     )
 
@@ -565,3 +571,255 @@ async def cr_anilist_search(request: Request, q: str = "") -> JSONResponse:
     ]
 
     return JSONResponse({"ok": True, "results": simplified})
+
+
+# ---------------------------------------------------------------------------
+# Unmapped CR episodes — history the sync could not place
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/crunchyroll/unmapped/{row_id}/map")
+async def map_unmapped_episode(request: Request, row_id: int) -> JSONResponse:
+    """Write an unmapped CR episode's progress to a user-chosen AniList entry.
+
+    This is the repair path for history the sync silently dropped: the user picks
+    the entry the season belongs to, the episode reached on Crunchyroll is
+    written to it, and the report is closed. The write goes through the same
+    cr_sync_log audit trail as a normal sync, so it can be undone from History.
+    """
+    db = request.app.state.db
+    anilist_client = request.app.state.anilist_client
+
+    payload = await request.json()
+    try:
+        anilist_id = int(payload.get("anilist_id") or 0)
+    except (TypeError, ValueError):
+        anilist_id = 0
+    if not anilist_id:
+        return JSONResponse(
+            {"ok": False, "error": "anilist_id is required"}, status_code=400
+        )
+
+    row = await db.get_cr_unmapped_entry(row_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
+    if row.get("resolved_at"):
+        return JSONResponse({"ok": False, "error": "Already resolved"}, status_code=400)
+
+    users = await db.get_users_by_service("anilist")
+    user = next((u for u in users if u["user_id"] == row["user_id"]), None)
+    if not user:
+        return JSONResponse({"ok": False, "error": "User not found"}, status_code=404)
+
+    # Let the caller override the episode (the recorded one is the highest the
+    # sync saw, which is what the user watched unless they say otherwise).
+    try:
+        progress = int(payload.get("episode") or row["cr_episode"])
+    except (TypeError, ValueError):
+        progress = row["cr_episode"]
+    if progress < 0:
+        return JSONResponse(
+            {"ok": False, "error": "episode must not be negative"}, status_code=400
+        )
+
+    access_token = user["access_token"]
+    anilist_user_id = user["anilist_id"]
+
+    try:
+        media = await anilist_client.get_anime_by_id(anilist_id)
+        total_episodes = (media or {}).get("episodes")
+        existing = await anilist_client.get_anime_list_entry(
+            anilist_id, access_token, anilist_user_id
+        )
+        before_status = (existing or {}).get("status") or ""
+        before_progress = (existing or {}).get("progress") or 0
+
+        if before_status == "COMPLETED" and before_progress >= progress:
+            # Never walk a finished entry backwards — same guard the syncers use.
+            await db.resolve_cr_unmapped(row_id, anilist_id)
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "skipped": True,
+                    "message": (
+                        f"AniList entry already COMPLETED at episode "
+                        f"{before_progress}; left unchanged and report closed."
+                    ),
+                }
+            )
+
+        finished = total_episodes is not None and progress >= int(total_episodes)
+        status = "COMPLETED" if finished else "CURRENT"
+        updated = await anilist_client.update_anime_progress(
+            anilist_id, access_token, progress, status
+        )
+        if not updated:
+            return JSONResponse(
+                {"ok": False, "error": "AniList update failed"}, status_code=500
+            )
+
+        show_title = get_primary_title(media or {}) if media else row["series_title"]
+        await db.insert_cr_sync_log_entry(
+            user_id=row["user_id"],
+            anilist_id=anilist_id,
+            show_title=show_title,
+            before_status=before_status,
+            before_progress=before_progress,
+            after_status=status,
+            after_progress=progress,
+            sync_run_id="manual-unmapped-fix",
+        )
+        await db.resolve_cr_unmapped(row_id, anilist_id)
+        return JSONResponse(
+            {
+                "ok": True,
+                "anilist_id": anilist_id,
+                "progress": progress,
+                "status": status,
+                "title": show_title,
+            }
+        )
+    except Exception as exc:
+        logger.exception("Mapping unmapped row %s failed", row_id)
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
+@router.post("/api/crunchyroll/unmapped/{row_id}/dismiss")
+async def dismiss_unmapped_episode(request: Request, row_id: int) -> JSONResponse:
+    """Close an unmapped report without writing anything to AniList."""
+    db = request.app.state.db
+    row = await db.get_cr_unmapped_entry(row_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
+    await db.resolve_cr_unmapped(row_id, None)
+    return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Repair scan — sync writes that landed on the wrong AniList entry
+# ---------------------------------------------------------------------------
+
+
+async def _build_correct_targets(
+    db: Any, run_id: str, user_id: str
+) -> dict[tuple[str, int], CorrectTarget]:
+    """Read a preview run as "where each watched CR season belongs".
+
+    A preview run is produced by the current matcher, so its rows are the
+    authority on the correct target. Using them means the repair scan needs no
+    extra Crunchyroll or AniList calls — and the user has to run a preview
+    anyway to restore the progress the old behaviour never wrote.
+    """
+    targets: dict[tuple[str, int], CorrectTarget] = {}
+    for row in await db.get_cr_preview_run(run_id):
+        if row.get("user_id") not in ("", user_id):
+            continue
+        anilist_id = int(row.get("anilist_id") or 0)
+        progress = int(row.get("proposed_progress") or 0)
+        cr_title = str(row.get("cr_title") or "")
+        if not anilist_id or not cr_title:
+            continue
+
+        seasons: set[int] = set()
+        try:
+            for episode in json.loads(row.get("episodes_json") or "[]"):
+                season = episode.get("cr_season")
+                if isinstance(season, int):
+                    seasons.add(season)
+        except (ValueError, TypeError):
+            pass
+
+        for season in seasons or {0}:
+            targets[(cr_title, season)] = CorrectTarget(anilist_id, progress)
+    return targets
+
+
+async def _build_group_members(db: Any, anilist_ids: set[int]) -> dict[int, set[int]]:
+    """Map each AniList id to every id in its series group."""
+    members: dict[int, set[int]] = {}
+    group_cache: dict[int, set[int]] = {}
+
+    for anilist_id in anilist_ids:
+        if anilist_id in members:
+            continue
+        group = await db.get_series_group_by_anilist_id(anilist_id)
+        group_id = (group or {}).get("id") if group else None
+        if not group_id:
+            members[anilist_id] = {anilist_id}
+            continue
+        if group_id not in group_cache:
+            entries = await db.get_series_group_entries(group_id)
+            group_cache[group_id] = {
+                int(e["anilist_id"]) for e in entries if e.get("anilist_id")
+            } or {anilist_id}
+        family = group_cache[group_id]
+        for member in family:
+            members.setdefault(member, family)
+        members.setdefault(anilist_id, family)
+
+    return members
+
+
+@router.post("/api/crunchyroll/repair/scan")
+async def repair_scan(request: Request, run_id: str = "") -> JSONResponse:
+    """Report sync writes that look like a mis-mapped Crunchyroll season.
+
+    Reads the given (or latest) preview run for the correct targets, then checks
+    active cr_sync_log rows for writes that hit a sibling entry of the same
+    series group at exactly the episode the correct entry should hold — the
+    signature of an episode number applied to the wrong season.
+
+    Reports only; reverting is the existing per-entry Undo in History.
+    """
+    db = request.app.state.db
+
+    users = await db.get_users_by_service("anilist")
+    user = users[0] if users else None
+    if not user:
+        return JSONResponse(
+            {"ok": False, "error": "No linked AniList account"}, status_code=400
+        )
+
+    user_id = user["user_id"]
+    active_run_id = run_id
+    if not active_run_id:
+        runs = await db.get_cr_preview_runs(user_id)
+        if not runs:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": (
+                        "No preview run found. Run a Crunchyroll preview scan "
+                        "first — its rows are what the repair scan compares against."
+                    ),
+                },
+                status_code=400,
+            )
+        active_run_id = runs[0]["run_id"]
+
+    targets = await _build_correct_targets(db, active_run_id, user_id)
+    if not targets:
+        return JSONResponse(
+            {"ok": True, "run_id": active_run_id, "suspects": [], "checked": 0}
+        )
+
+    log_rows = await db.get_cr_sync_log(user_id=user_id, limit=2000)
+    ids = {t.anilist_id for t in targets.values()}
+    ids |= {int(r.get("anilist_id") or 0) for r in log_rows if r.get("anilist_id")}
+    group_members = await _build_group_members(db, ids)
+
+    suspects = find_suspect_writes(targets, group_members, log_rows)
+    logger.info(
+        "Repair scan on run %s: %d suspect write(s) across %d watched season(s)",
+        active_run_id,
+        len(suspects),
+        len(targets),
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "run_id": active_run_id,
+            "checked": len(targets),
+            "suspects": [s.as_dict() for s in suspects],
+        }
+    )

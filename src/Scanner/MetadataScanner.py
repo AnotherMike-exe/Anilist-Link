@@ -12,7 +12,6 @@ from typing import Any
 from src.Clients.AnilistClient import AniListClient
 from src.Clients.PlexClient import PlexClient
 from src.Database.Connection import DatabaseManager
-from src.Matching.Normalizer import clean_title_for_search
 from src.Matching.TitleMatcher import TitleMatcher, get_primary_title
 from src.Scanner.SeriesGroupBuilder import SeriesGroupBuilder
 from src.Utils.Config import AppConfig
@@ -247,6 +246,20 @@ class MetadataScanner:
         logger.info("Scanning library: %s (%d shows)", library_title, len(shows))
 
         for show in shows:
+            # Stop the whole scan the moment AniList goes offline — every
+            # remaining show would only produce an unmatched result and a
+            # misleading "0 matched" report.
+            if self._anilist.health.is_down:
+                logger.warning(
+                    "Plex scan halted — AniList API unavailable (%s)",
+                    self._anilist.health.reason,
+                )
+                results.errors.append(
+                    "Scan halted — AniList API is unavailable. "
+                    "It will resume once AniList is back online."
+                )
+                return
+
             folder_name = getattr(show, "folder_name", "") or ""
             # The bulk /all endpoint omits Location data.  Always fetch
             # the real filesystem path so we can show it in the UI and
@@ -409,8 +422,9 @@ class MetadataScanner:
                 return
 
             # 4. Search AniList and match — prefer folder name over Plex title
-            search_title = clean_title_for_search(folder_name or title)
-            candidates = await self._anilist.search_anime(search_title, per_page=15)
+            candidates, search_title = await self._anilist.search_anime_with_variants(
+                folder_name or title, per_page=15
+            )
 
             if not candidates:
                 logger.warning("  [no results] %s", title)

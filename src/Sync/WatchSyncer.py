@@ -68,6 +68,10 @@ class WatchSyncer:
         self._episode_data_cache: dict[tuple[str, int], dict[str, Any]] = {}
         # Key: (user_id, anime_id), Value: highest_progress_processed
         self._processed: dict[tuple[str, int], int] = {}
+        # Highest CR episode seen per (series_title, cr_season) across the whole
+        # run — not per page, so a series straddling a page boundary is not
+        # re-evaluated at the lower episode a later page carries.
+        self._series_max: dict[tuple[str, int], int] = {}
         # Unique ID for this sync run — used when writing cr_sync_log entries
         self._sync_run_id: str = uuid.uuid4().hex
 
@@ -206,7 +210,34 @@ class WatchSyncer:
 
         series_progress = self._group_episodes_by_series_and_season(episodes)
 
-        for (series_title, cr_season), latest_episode in series_progress.items():
+        for (series_title, cr_season), page_episode in series_progress.items():
+            if self._anilist.health.is_down:
+                logger.warning(
+                    "Crunchyroll sync halted — AniList API unavailable (%s)",
+                    self._anilist.health.reason,
+                )
+                break
+
+            key = (series_title, cr_season)
+            already = self._series_max.get(key)
+            if already is not None and page_episode <= already:
+                # CR history is newest-first, so a later page carries earlier
+                # episodes of a series that spans the page boundary. The highest
+                # episode already stands.
+                logger.debug(
+                    "%s season %d already processed at episode %d, skipping "
+                    "page episode %d",
+                    series_title,
+                    cr_season,
+                    already,
+                    page_episode,
+                )
+                page_stats["skipped_episodes"] += len(users)
+                continue
+
+            latest_episode = max(already or 0, page_episode)
+            self._series_max[key] = latest_episode
+
             try:
                 for user in users:
                     success = await self._process_series_entry(
@@ -250,6 +281,12 @@ class WatchSyncer:
                     or ep.episode_number > series_season_progress[key]
                 ):
                     series_season_progress[key] = ep.episode_number
+                # The season title identifies the season far more reliably than
+                # CR's season number — see season_from_cr_season_title.
+                if ep.season_title:
+                    self._episode_data_cache.setdefault(key, {})[
+                        "season_title"
+                    ] = ep.season_title
 
         self._sync_results["total_episodes"] = len(episodes)
         return series_season_progress
@@ -306,6 +343,14 @@ class WatchSyncer:
             if not search_results:
                 logger.warning("No AniList results found for: %s", series_title)
                 self._sync_results["no_matches_found"] += 1
+                await self._record_unmapped(
+                    user_id,
+                    series_title,
+                    cr_season,
+                    cr_episode,
+                    "no_anilist_results",
+                    "AniList returned no entries for this title",
+                )
                 return False
 
             logger.info("Found %d AniList entries", len(search_results))
@@ -321,9 +366,16 @@ class WatchSyncer:
                 self._season_structure_cache[cache_key] = season_structure
 
             # Determine correct entry + episode
+            cr_season_title = self._episode_data_cache.get(
+                (series_title, cr_season), {}
+            ).get("season_title", "")
             matched_entry, actual_season, actual_episode = (
                 self._matcher.determine_correct_entry_and_episode(
-                    series_title, cr_season, cr_episode, season_structure
+                    series_title,
+                    cr_season,
+                    cr_episode,
+                    season_structure,
+                    cr_season_title=cr_season_title,
                 )
             )
 
@@ -332,7 +384,20 @@ class WatchSyncer:
                     "Could not determine correct AniList entry for %s", series_title
                 )
                 self._sync_results["no_matches_found"] += 1
+                known = ", ".join(str(sn) for sn in sorted(season_structure))
+                await self._record_unmapped(
+                    user_id,
+                    series_title,
+                    cr_season,
+                    cr_episode,
+                    "unknown_season",
+                    f"No AniList entry for season {cr_season}"
+                    + (f" — the season map covers {known}" if known else ""),
+                )
                 return False
+
+            # This (series, season) resolves again — retire any open report.
+            await self._clear_unmapped(user_id, series_title, cr_season)
 
             anime_id = matched_entry["id"]
             anime_title = get_primary_title(matched_entry)
@@ -446,6 +511,52 @@ class WatchSyncer:
         except Exception as exc:
             logger.error("Error processing %s: %s", series_title, exc)
             return False
+
+    # ==================================================================
+    # Unmapped reporting
+    # ==================================================================
+
+    async def _record_unmapped(
+        self,
+        user_id: str,
+        series_title: str,
+        cr_season: int,
+        cr_episode: int,
+        reason: str,
+        detail: str,
+    ) -> None:
+        """Persist a CR episode the sync could not place.
+
+        Without this a mis-mapped or unmappable episode left no trace a user
+        could see: cr_sync_log records only successful writes, so nothing was
+        written and nothing showed up in the history.
+        """
+        if self._dry_run or not user_id:
+            return
+        episode_data = self._episode_data_cache.get((series_title, cr_season), {})
+        try:
+            await self._db.record_cr_unmapped(
+                user_id=user_id,
+                series_title=series_title,
+                cr_season=cr_season,
+                cr_episode=cr_episode,
+                reason=reason,
+                detail=detail,
+                season_title=episode_data.get("season_title", ""),
+            )
+        except Exception as exc:
+            logger.warning("Failed to record unmapped %s: %s", series_title, exc)
+
+    async def _clear_unmapped(
+        self, user_id: str, series_title: str, cr_season: int
+    ) -> None:
+        """Retire an open unmapped report once the season maps again."""
+        if self._dry_run or not user_id:
+            return
+        try:
+            await self._db.clear_cr_unmapped(user_id, series_title, cr_season)
+        except Exception as exc:
+            logger.debug("Failed to clear unmapped %s: %s", series_title, exc)
 
     # ==================================================================
     # Movie processing
@@ -1014,6 +1125,7 @@ class WatchSyncer:
         self._season_structure_cache.clear()
         self._episode_data_cache.clear()
         self._processed.clear()
+        self._series_max.clear()
 
     def _report_results(self) -> None:
         """Log sync results summary."""

@@ -113,6 +113,7 @@ async def plex_scan_progress_page(request: Request) -> HTMLResponse:
     """Render the progress page that polls for scan status."""
     templates = request.app.state.templates
     return templates.TemplateResponse(
+        request,
         "scan_progress.html",
         {"request": request},
     )
@@ -157,6 +158,7 @@ async def plex_scan_results_page(request: Request) -> Response:
     failed_items = [i for i in results.items if i.status == "failed"]
 
     return templates.TemplateResponse(
+        request,
         "scan_preview.html",
         {
             "request": request,

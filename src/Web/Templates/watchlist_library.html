@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% from "macros.html" import render_title %}
-{% block title %}Anilist-Link: My Library{% endblock %}
+{% block title %}Anilist-Link: My Watchlist{% endblock %}
 {% block container_class %}container-wide{% endblock %}
 
 {% block content %}
@@ -91,11 +91,15 @@
 <div class="toast-container" id="toastContainer"></div>
 
 <div class="library-header">
-  <h1>My Library</h1>
+  <h1>My Watchlist</h1>
   <div class="library-controls">
     <button class="btn btn-primary" id="refreshBtn" onclick="refreshWatchlist()">
       Refresh from AniList
     </button>
+    {% if arr_enabled %}
+    <button class="btn btn-secondary" id="resyncSeasonsBtn" onclick="resyncSonarrSeasons()"
+            title="Re-walk every linked series' AniList sequel chain and re-record which Sonarr season and episode range each entry covers. Links siblings that were missed. Changes nothing on disk or in Sonarr.">↺ Re-sync Seasons</button>
+    {% endif %}
     <div class="view-toggle">
       <button class="view-btn active" id="tableViewBtn" onclick="setWatchlistView('table')" title="Table view">☰</button>
       <button class="view-btn" id="gridViewBtn" onclick="setWatchlistView('grid')" title="Grid view">⊞</button>
@@ -120,10 +124,11 @@
 <!-- Search / controls -->
 <div class="search-row">
   <input type="text" class="search-input" id="searchInput" placeholder="Search titles…" oninput="applyFilters()">
-  <label class="missing-toggle">
-    <input type="checkbox" id="missingOnly" onchange="applyFilters()">
-    Missing only
-  </label>
+  <span class="text-muted" style="font-size:0.8rem">
+    Use the ▾ on any column header to sort or filter it.
+  </span>
+  <button type="button" class="btn btn-secondary btn-xs" onclick="clearFilters()"
+          title="Reset search and all column filters">Clear filters</button>
 </div>
 
 <!-- Table view -->
@@ -137,10 +142,10 @@
       <th class="sortable-th" data-col="year" onclick="sortTable('year')">Year <span class="sort-indicator">↕</span></th>
       <th class="sortable-th" data-col="eps" onclick="sortTable('eps')">Episodes <span class="sort-indicator">↕</span></th>
       <th class="sortable-th" data-col="status" onclick="sortTable('status')">Watch Status <span class="sort-indicator">↕</span></th>
-      <th>Airing</th>
+      <th class="sortable-th" data-col="airing" onclick="sortTable('airing')">Airing <span class="sort-indicator">↕</span></th>
       <th class="sortable-th" data-col="progress" onclick="sortTable('progress')">Progress <span class="sort-indicator">↕</span></th>
-      <th>Local</th>
-      <th>*arr</th>
+      <th class="sortable-th" data-col="local" onclick="sortTable('local')">Local <span class="sort-indicator">↕</span></th>
+      <th class="sortable-th" data-col="arr" onclick="sortTable('arr')">*arr <span class="sort-indicator">↕</span></th>
       <th>Actions</th>
     </tr>
   </thead>
@@ -164,6 +169,16 @@
       data-status="{{ ls }}"
       data-local="{{ entry.local_status }}"
       data-arr="{{ entry.arr_status }}"
+      data-sort-local="{{ entry.local_status }}"
+      data-sort-arr="{{ entry.arr_status }}{{ entry.arr_service }}"
+      data-sort-airing="{{ entry.airing_status }}"
+      data-filter-title="{{ entry.anilist_title|e }}"
+      data-filter-format="{{ entry.anilist_format }}"
+      data-filter-year="{{ entry.start_year or '' }}"
+      data-filter-status="{{ ls }}"
+      data-filter-airing="{{ entry.airing_status }}"
+      data-filter-local="{{ entry.local_status }}"
+      data-filter-arr="{{ entry.arr_status }}"
       data-title="{{ entry.anilist_title | lower }} {{ (entry.title_romaji or '') | lower }} {{ (entry.title_english or '') | lower }} {{ (entry.title_native or '') | lower }} {{ (entry.title_synonyms or '') | lower }}"
       data-sort-title="{{ entry.anilist_title | lower }}"
       data-sort-format="{{ (entry.anilist_format or '') | lower }}"
@@ -283,10 +298,37 @@
                   onclick="reprocessEntry('radarr', {{ entry.radarr_id }}, this, true)"
                   title="Preview what file would be moved and where">Preview Move</button>
           {% endif %}
+          <button class="btn btn-secondary btn-xs"
+                  onclick="unlinkFromArr({{ aid }}, '{{ entry.anilist_title|e }}')"
+                  title="Remove this Sonarr/Radarr link from our database so the entry can be matched to a different series. Does not change Sonarr/Radarr.">Unlink</button>
+          <button class="btn btn-secondary btn-xs"
+                  onclick="rescanInArr({{ aid }}, this)"
+                  title="Tell Sonarr/Radarr to look at this entry's folder again. Use when the files are on disk and correctly placed but *arr still lists them as missing. Nothing on disk is touched.">Rescan in *arr</button>
+          {% if entry.arr_service == 'sonarr' and entry.sonarr_id %}
+          <button class="btn btn-secondary btn-xs"
+                  onclick="mapEpisodesInSonarr({{ aid }}, this)"
+                  title="Tell Sonarr which episode each of this entry's files is. Use when Sonarr can see the files but lists them with no season or episode — a split cour we number as S02 but Sonarr counts as one long season. Shows you the mapping first; no file is renamed or moved.">Map Episodes</button>
+          {% endif %}
+          <button class="btn btn-secondary btn-xs"
+                  onclick="verifyArrLink({{ aid }}, this)"
+                  title="Re-check this entry against Sonarr/Radarr: clears the link if it was deleted there, and corrects the stored path if the files have since been restructured. Never moves files.">Verify Link</button>
           {% elif arr_enabled %}
           <button class="btn btn-secondary btn-xs"
                   onclick="previewAdd({{ aid }}, '{{ entry.anilist_title|e }}', this)"
                   title="Add to Sonarr/Radarr">+ Add</button>
+          {% endif %}
+          {# Offer the filesystem Smart Move for any on-disk item. It's a
+             preview-first, manual action, so it's safe to always surface —
+             useful for items *arr doesn't actually manage a file for (e.g. a
+             movie whose file came from elsewhere but shares a Sonarr series
+             with the TV seasons). #}
+          {% if entry.folder_path %}
+          <button class="btn btn-secondary btn-xs"
+                  onclick="openSmartMoveWl({{ aid }}, this)"
+                  title="Move this on-disk folder into its standardized library location (does not require Sonarr/Radarr)">Fix Location</button>
+          <button class="btn btn-secondary btn-xs"
+                  onclick="rescanEntryFolder({{ aid }}, this)"
+                  title="Re-scan this entry's folder for files you added by hand: renames and files them into the right season folders, then tells Sonarr/Radarr where they went.">Re-scan Folder</button>
           {% endif %}
         </div>
       </td>
@@ -308,6 +350,13 @@
        data-status="{{ ls }}"
        data-local="{{ entry.local_status }}"
        data-arr="{{ entry.arr_status }}"
+       data-filter-title="{{ entry.anilist_title|e }}"
+       data-filter-format="{{ entry.anilist_format }}"
+       data-filter-year="{{ entry.start_year or '' }}"
+       data-filter-status="{{ ls }}"
+       data-filter-airing="{{ entry.airing_status }}"
+       data-filter-local="{{ entry.local_status }}"
+       data-filter-arr="{{ entry.arr_status }}"
        data-title="{{ entry.anilist_title | lower }} {{ (entry.title_romaji or '') | lower }} {{ (entry.title_english or '') | lower }} {{ (entry.title_native or '') | lower }} {{ (entry.title_synonyms or '') | lower }}"
        data-idx="{{ loop.index0 }}"
        onclick="openWatchlistDetail(this.dataset.idx)"
@@ -462,8 +511,9 @@
           <option value="none">None (don't monitor)</option>
         </select>
       </div>
-      <div style="font-size:0.82rem;">
-        <a href="#" id="matchPickDifferent" onclick="openDifferentMatch();return false;">Pick a different match…</a>
+      <div>
+        <button type="button" class="btn btn-secondary btn-xs" id="matchPickDifferent"
+                onclick="openDifferentMatch()">Pick a different match…</button>
       </div>
     </div>
     <div class="modal-footer">
@@ -490,6 +540,23 @@
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeDisambig()">Cancel</button>
       <button class="btn btn-primary" id="confirmPickBtn" onclick="confirmPick()" disabled style="margin-left:0.5rem;">Add to Sonarr</button>
+    </div>
+  </div>
+</div>
+
+<!-- Smart Move (Fix Location) modal — for on-disk entries not tracked in *arr -->
+<div id="smartMoveModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="smartMoveTitle">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2 id="smartMoveTitle">Fix Location</h2>
+      <button class="modal-close" onclick="closeSmartMoveWl()" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div id="smartMoveWlBody"><p style="color:var(--text-muted,#666);font-size:0.85rem;">Analyzing…</p></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeSmartMoveWl()">Cancel</button>
+      <button class="btn btn-primary" id="smartMoveWlConfirm" onclick="confirmSmartMoveWl()" disabled style="margin-left:0.5rem;">Move</button>
     </div>
   </div>
 </div>
@@ -530,8 +597,11 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
   };
 
   // Sort table by column
-  window.sortTable = function(col) {
-    if (sortCol === col) {
+  window.sortTable = function(col, dir) {
+    if (dir) {
+      sortCol = col;
+      sortDir = dir;
+    } else if (sortCol === col) {
       sortDir = -sortDir;
     } else {
       sortCol = col;
@@ -571,32 +641,56 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     applyFilters();
   };
 
+  var colFilters = null;
+
+  document.addEventListener('DOMContentLoaded', function() {
+    // ?q= prefills the search — the library page's "+ Add" links here, and
+    // landing on an unfiltered list would make the link useless.
+    try {
+      var q = new URLSearchParams(window.location.search).get('q');
+      if (q) {
+        var input = document.getElementById('searchInput');
+        if (input) { input.value = q; applyFilters(); }
+      }
+    } catch (e) { /* older browsers just get the unfiltered list */ }
+
+    if (typeof TableFilters !== 'function') return;
+    colFilters = new TableFilters({
+      tableId: 'libraryTable',
+      bodyId: 'tableBody',
+      onChange: function() { applyFilters(); },
+      onSort: function(col, dir) { sortTable(col, dir); }
+    });
+  });
+
+  window.clearFilters = function() {
+    document.getElementById('searchInput').value = '';
+    if (colFilters) colFilters.clear(); else applyFilters();
+  };
+
   window.applyFilters = function() {
     var search = document.getElementById('searchInput').value.toLowerCase();
-    var missingOnly = document.getElementById('missingOnly').checked;
     // Table rows
     var rows = document.querySelectorAll('#tableBody tr');
     var visible = 0;
     rows.forEach(function(row) {
       var status = row.getAttribute('data-status') || '';
-      var local = row.getAttribute('data-local') || '';
       var title = row.getAttribute('data-title') || '';
       var show = true;
       if (currentFilter !== 'ALL' && status !== currentFilter) show = false;
-      if (missingOnly && local !== 'missing') show = false;
       if (search && !title.includes(search)) show = false;
+      if (show && colFilters && !colFilters.passes(row)) show = false;
       row.style.display = show ? '' : 'none';
       if (show) visible++;
     });
     // Grid cards
     document.querySelectorAll('#gridView .media-card').forEach(function(card) {
       var status = card.getAttribute('data-status') || '';
-      var local = card.getAttribute('data-local') || '';
       var title = card.getAttribute('data-title') || '';
       var show = true;
       if (currentFilter !== 'ALL' && status !== currentFilter) show = false;
-      if (missingOnly && local !== 'missing') show = false;
       if (search && !title.includes(search)) show = false;
+      if (show && colFilters && !colFilters.passes(card)) show = false;
       card.classList.toggle('hidden', !show);
     });
     var noResults = document.getElementById('noResults');
@@ -856,11 +950,20 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
   // 2-step add flow: resolve → preview → confirm
   // ---------------------------------------------------------------------------
   var _preview = { anilistId: null, btn: null, service: 'sonarr', tvdbId: null, tmdbId: null, title: '' };
-  var _disambig = { anilistId: null, btn: null, service: 'sonarr', selectedTvdbId: null, searchTimer: null };
+  var _disambig = { anilistId: null, btn: null, service: 'sonarr', selectedTvdbId: null, searchTimer: null, title: '' };
 
   function onAddSuccess(anilistId, service, btn, arrId) {
     showToast('Added to ' + service + ' successfully', 'success');
+    offerMoveToLibrary(anilistId, service, arrId);
+    markLinkedInPlace(anilistId, service, arrId);
+    // Sibling seasons are linked by a background task that starts after this
+    // response returns, so poll briefly and light up those rows too. Without
+    // this they keep showing "+ Add" until a reload — which would drop the
+    // user's search filter, so nobody reloads and every season looks unlinked.
+    reconcileLinkedRows();
+  }
 
+  function markLinkedInPlace(anilistId, service, arrId) {
     // Update the in-memory ENTRIES array so the detail modal reflects the new state
     for (var i = 0; i < ENTRIES.length; i++) {
       if (ENTRIES[i].anilist_id === anilistId) {
@@ -923,10 +1026,20 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     });
   }
 
+  // Every resolve path ends by handing the Add button back. One restore, so a
+  // path that forgets the busy class can't leave the button stuck wide.
+  function restoreAddBtn(b) {
+    if (!b) return;
+    b.disabled = false;
+    b.classList.remove('is-busy');
+    b._origHtml = null;
+    b.textContent = '+ Add';
+  }
+  window.restoreAddBtn = restoreAddBtn;
+
   // Step 1: resolve the match (no add yet)
   window.previewAdd = function(anilistId, title, btn) {
-    btn.disabled = true;
-    btn.textContent = '\u2026';
+    setBusy(btn, 'Resolving\u2026');
 
     // Show loading modal with animated status
     var loadingModal = document.getElementById('resolveLoadingModal');
@@ -956,8 +1069,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
         openDisambig(anilistId, btn, title, data.service || 'sonarr', data.candidates || []);
       } else if (!data.resolved) {
         showToast('Could not resolve: ' + (data.error || 'unknown'), 'error');
-        btn.disabled = false;
-        btn.textContent = '+ Add';
+        restoreAddBtn(btn);
       } else {
         openMatchPreview(anilistId, btn, title, data);
       }
@@ -969,16 +1081,14 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       var msg = '';
       try { msg = JSON.parse(e.data).error; } catch(_) {}
       showToast('Request failed: ' + (msg || 'connection error'), 'error');
-      btn.disabled = false;
-      btn.textContent = '+ Add';
+      restoreAddBtn(btn);
     });
 
     es.onerror = function() {
       es.close();
       clearLoadingState();
       showToast('Connection lost during resolve', 'error');
-      btn.disabled = false;
-      btn.textContent = '+ Add';
+      restoreAddBtn(btn);
     };
   };
 
@@ -1025,23 +1135,25 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     }
 
     var confirmBtn = document.getElementById('confirmMatchBtn');
-    confirmBtn.textContent = data.already_in_arr
+    // in_sonarr means the series exists in Sonarr, which is what decides
+    // whether this is a link or a fresh add. already_in_arr only says our DB
+    // has a row for this entry, which is a different question.
+    var linksToExisting = data.in_sonarr === true ||
+      (data.siblings && data.siblings.length > 0) ||
+      data.already_in_arr === true;
+    confirmBtn.textContent = linksToExisting
       ? 'Link to existing ' + label + ' series'
       : 'Add to ' + label;
     confirmBtn.disabled = false;
 
-    document.getElementById('matchPickDifferent').style.display =
-      (_preview.service === 'radarr') ? 'none' : '';
+    document.getElementById('matchPickDifferent').style.display = '';
 
     document.getElementById('matchPreviewModal').classList.remove('hidden');
   };
 
   window.closeMatchPreview = function() {
     document.getElementById('matchPreviewModal').classList.add('hidden');
-    if (_preview.btn) {
-      _preview.btn.disabled = false;
-      _preview.btn.textContent = '+ Add';
-    }
+    restoreAddBtn(_preview.btn);
     _preview.anilistId = null;
     _preview.btn = null;
   };
@@ -1052,10 +1164,22 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     var confirmBtn = document.getElementById('confirmMatchBtn');
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Adding\u2026';
+    // A slow Sonarr/Radarr shouldn't look like a hang. Say so rather than
+    // sitting on "Adding…" with no explanation.
+    var slowTimer = setTimeout(function() {
+      confirmBtn.textContent = 'Still working\u2026';
+      var sib = document.getElementById('matchSiblings');
+      if (sib) {
+        sib.textContent = 'Waiting on Sonarr/Radarr — this can take a moment on a large library.';
+        sib.style.display = '';
+      }
+    }, 6000);
+    function clearSlowTimer() { clearTimeout(slowTimer); }
 
     var monitorMode = document.getElementById('matchMonitorMode').value;
     var body = { anilist_id: _preview.anilistId, monitor_strategy: monitorMode };
     if (_preview.tvdbId) body.tvdb_id = _preview.tvdbId;
+    if (_preview.tmdbId) body.tmdb_id = _preview.tmdbId;
 
     fetch('/api/library/add-to-arr', {
       method: 'POST',
@@ -1063,20 +1187,19 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       body: JSON.stringify(body)
     }).then(function(r) { return r.json(); })
       .then(function(data) {
+        clearSlowTimer();
         document.getElementById('matchPreviewModal').classList.add('hidden');
         if (data.ok) {
           onAddSuccess(_preview.anilistId, data.service, _preview.btn, data.arr_id);
         } else {
           showToast('Error: ' + (data.error || 'unknown'), 'error');
-          if (_preview.btn) {
-            _preview.btn.disabled = false;
-            _preview.btn.textContent = '+ Add';
-          }
+          restoreAddBtn(_preview.btn);
         }
         _preview.anilistId = null;
         _preview.btn = null;
       })
       .catch(function(e) {
+        clearSlowTimer();
         showToast('Request failed: ' + e.message, 'error');
         confirmBtn.disabled = false;
         confirmBtn.textContent = 'Add';
@@ -1097,9 +1220,13 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
   window.openDisambig = function(anilistId, btn, title, service, preloadedCandidates) {
     _disambig.anilistId = anilistId;
     _disambig.btn = btn;
+    _disambig.title = title || '';
     _disambig.service = service || 'sonarr';
     _disambig.selectedTvdbId = null;
 
+    var isMovie = _disambig.service === 'radarr';
+    document.getElementById('disambigTitle').textContent =
+      'Pick the correct ' + (isMovie ? 'movie' : 'series');
     document.getElementById('disambigHint').textContent =
       'Could not auto-match \u201c' + title + '\u201d on ' + _disambig.service + '. Pick the correct entry:';
     document.getElementById('disambigSearch').value = title;
@@ -1119,10 +1246,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
 
   window.closeDisambig = function() {
     document.getElementById('disambigModal').classList.add('hidden');
-    if (_disambig.btn) {
-      _disambig.btn.disabled = false;
-      _disambig.btn.textContent = '+ Add';
-    }
+    restoreAddBtn(_disambig.btn);
     _disambig.anilistId = null;
     _disambig.btn = null;
     _disambig.selectedTvdbId = null;
@@ -1139,9 +1263,12 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       list.innerHTML = '<p style="color:var(--text-muted,#666);font-size:0.85rem;">No results found.</p>';
       return;
     }
+    var isMovie = _disambig.service === 'radarr';
+    var idLabel = isMovie ? 'TMDB' : 'TVDB';
     list.innerHTML = candidates.map(function(c) {
+      var idVal = isMovie ? c.tmdb_id : c.tvdb_id;
       var scoreLabel = c.score != null ? ' &nbsp;&middot;&nbsp; ' + c.score + '%' : '';
-      return '<div class="candidate-card" data-tvdb="' + esc(c.tvdb_id) + '" onclick="selectCandidate(this,' + c.tvdb_id + ')">' +
+      return '<div class="candidate-card" data-id="' + esc(idVal) + '" onclick="selectCandidate(this,' + idVal + ')">' +
         (c.remote_poster
           ? '<img src="' + esc(c.remote_poster) + '" class="candidate-poster" loading="lazy" onerror="this.style.display=\'none\'">'
           : '<div class="candidate-poster-ph"></div>') +
@@ -1150,7 +1277,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
           '<div class="candidate-meta">' +
             (c.year ? c.year + ' &nbsp;&middot;&nbsp; ' : '') +
             escHtml(c.status || '') +
-            ' &nbsp;&middot;&nbsp; TVDB: ' + esc(c.tvdb_id) +
+            ' &nbsp;&middot;&nbsp; ' + idLabel + ': ' + esc(idVal) +
             scoreLabel +
           '</div>' +
           (c.overview ? '<div class="candidate-overview">' + escHtml(c.overview) + '</div>' : '') +
@@ -1163,7 +1290,10 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     if (!q.trim()) return;
     var list = document.getElementById('candidateList');
     list.innerHTML = '<p style="color:var(--text-muted,#666);font-size:0.85rem;">Searching\u2026</p>';
-    fetch('/api/watchlist/sonarr-lookup?q=' + encodeURIComponent(q))
+    var endpoint = _disambig.service === 'radarr'
+      ? '/api/watchlist/radarr-lookup'
+      : '/api/watchlist/sonarr-lookup';
+    fetch(endpoint + '?q=' + encodeURIComponent(q))
       .then(function(r) { return r.json(); })
       .then(function(data) { renderCandidates(data.candidates || []); })
       .catch(function() {
@@ -1182,34 +1312,74 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     if (!_disambig.selectedTvdbId || !_disambig.anilistId) return;
     var confirmBtn = document.getElementById('confirmPickBtn');
     confirmBtn.disabled = true;
-    confirmBtn.textContent = 'Adding\u2026';
+    confirmBtn.textContent = 'Checking\u2026';
+    var pickLabel = 'Add to ' + (_disambig.service === 'radarr' ? 'Radarr' : 'Sonarr');
+    function resetPickBtn() {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = pickLabel;
+    }
 
-    fetch('/api/library/add-to-arr', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ anilist_id: _disambig.anilistId, tvdb_id: _disambig.selectedTvdbId })
-    }).then(function(r) { return r.json(); })
+    var pickBody = { anilist_id: _disambig.anilistId };
+    if (_disambig.service === 'radarr') {
+      pickBody.tmdb_id = _disambig.selectedTvdbId;
+    } else {
+      pickBody.tvdb_id = _disambig.selectedTvdbId;
+    }
+
+    // Re-resolve with the confirmed id rather than adding straight away: this
+    // is what surfaces the siblings banner and the season this entry will take,
+    // which a hand-picked match previously skipped entirely.
+    var idParam = _disambig.service === 'radarr'
+      ? 'tmdb_id=' + encodeURIComponent(pickBody.tmdb_id)
+      : 'tvdb_id=' + encodeURIComponent(pickBody.tvdb_id);
+    var aid = _disambig.anilistId;
+    var pickBtn = _disambig.btn;
+    var pickTitle = _disambig.title || '';
+
+    fetch('/api/watchlist/resolve?anilist_id=' + aid + '&' + idParam)
+      .then(function(r) { return r.json(); })
       .then(function(data) {
         document.getElementById('disambigModal').classList.add('hidden');
-        if (data.ok) {
-          onAddSuccess(_disambig.anilistId, data.service, _disambig.btn, data.arr_id);
-        } else {
-          showToast('Error: ' + (data.error || 'unknown'), 'error');
-          if (_disambig.btn) {
-            _disambig.btn.disabled = false;
-            _disambig.btn.textContent = '+ Add';
-          }
-        }
+        resetPickBtn();
         _disambig.anilistId = null;
         _disambig.btn = null;
         _disambig.selectedTvdbId = null;
+        if (data && data.resolved) {
+          openMatchPreview(aid, pickBtn, pickTitle, data);
+        } else {
+          // Confirmed id didn't resolve — fall back to adding it directly
+          // rather than dead-ending on a picker the user already answered.
+          addPickedDirectly(aid, pickBody, pickBtn);
+        }
+      })
+      .catch(function(e) {
+        document.getElementById('disambigModal').classList.add('hidden');
+        resetPickBtn();
+        showToast('Preview failed (' + e.message + ') — adding directly', 'error');
+        addPickedDirectly(aid, pickBody, pickBtn);
+      });
+  };
+
+  // Fallback used when a confirmed pick can't be previewed.
+  function addPickedDirectly(anilistId, body, btn) {
+    fetch('/api/library/add-to-arr', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.ok) {
+          onAddSuccess(anilistId, data.service, btn, data.arr_id);
+        } else {
+          showToast('Error: ' + (data.error || 'unknown'), 'error');
+          restoreAddBtn(btn);
+        }
       })
       .catch(function(e) {
         showToast('Request failed: ' + e.message, 'error');
-        confirmBtn.disabled = false;
-        confirmBtn.textContent = 'Add to ' + (_disambig.service === 'radarr' ? 'Radarr' : 'Sonarr');
+        restoreAddBtn(btn);
       });
-  };
+  }
 
   function esc(v) { return String(v == null ? '' : v); }
   function escHtml(str) {
@@ -1249,9 +1419,10 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
         btn.disabled = false;
         btn.innerHTML = '↺ Re-sync Seasons';
         if (data.ok) {
-          var msg = 'Season sync done: ' + data.total_season_updates + ' updated, ' + data.total_linked + ' new links.';
+          var msg = 'Season sync done: ' + data.total_season_updates + ' updated, ' +
+                    data.total_linked + ' new links, ' + (data.total_ranges_written || 0) + ' episode ranges.';
           showToast(msg, 'success');
-          if (data.total_season_updates > 0 || data.total_linked > 0) {
+          if (data.total_season_updates > 0 || data.total_linked > 0 || data.total_ranges_written > 0) {
             setTimeout(function() { window.location.reload(); }, 1800);
           }
         } else {
@@ -1376,10 +1547,10 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       });
   };
 
-  window.unlinkFromSonarr = async function(anilistId, title) {
-    if (!confirm('Remove the Sonarr link for "' + title + '" from our database?\n\nThis only clears our records — it does not affect Sonarr itself.')) return;
+  window.unlinkFromArr = async function(anilistId, title) {
+    if (!confirm('Remove the Sonarr/Radarr link for "' + title + '" from our database?\n\nThis only clears our records — it does not remove anything from Sonarr or Radarr. The entry will offer "+ Add" again so you can link it to the correct series.')) return;
     try {
-      var resp = await fetch('/api/library/unlink-from-sonarr', {
+      var resp = await fetch('/api/library/unlink-from-arr', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({anilist_id: anilistId})
@@ -1387,8 +1558,8 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
       var data = await resp.json();
       if (data.ok) {
         closeWatchlistDetail();
-        showToast('Unlinked "' + title + '" from Sonarr — you can now re-add it.');
-        setTimeout(function() { loadWatchlist(); }, 600);
+        markUnlinkedInPlace(anilistId);
+        showToast('Unlinked "' + title + '" — you can now link it to the correct series.');
       } else {
         alert('Unlink failed: ' + (data.error || 'unknown error'));
       }
@@ -1397,10 +1568,359 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     }
   };
 
-  window.reprocessEntry = async function(service, arrId, btn, dryRun) {
+  // A button that has kicked off a request says what it is doing and keeps its
+  // footprint. Collapsing the label to an ellipsis reads as broken, not busy.
+  function setBusy(btn, label) {
+    if (!btn._origHtml) btn._origHtml = btn.innerHTML;
     btn.disabled = true;
-    var orig = btn.textContent;
-    btn.textContent = '…';
+    btn.classList.add('is-busy');
+    btn.innerHTML = '<span class="spinner"></span>' + (label || 'Working\u2026');
+  }
+
+  function clearBusy(btn) {
+    btn.disabled = false;
+    btn.classList.remove('is-busy');
+    if (btn._origHtml) { btn.innerHTML = btn._origHtml; btn._origHtml = null; }
+  }
+  window.setBusy = setBusy;
+  window.clearBusy = clearBusy;
+
+  // Re-check an entry against *arr: clears a link deleted there, and corrects
+  // a path left stale by a restructure. Never touches files.
+  window.verifyArrLink = async function(anilistId, btn) {
+    setBusy(btn, 'Verifying\u2026');
+    try {
+      var resp = await fetch('/api/arr/verify-link', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({anilist_id: anilistId})
+      });
+      var data = await resp.json();
+      var msg = data.message || data.error || 'unknown result';
+      showToast(msg, data.ok === false ? 'error' : 'success');
+      // A cleared link or a new path changes what the row should offer.
+      if (data.changed) {
+        if (typeof closeMediaDetail === 'function') closeMediaDetail();
+        setTimeout(function() { window.location.reload(); }, 1200);
+      }
+    } catch(e) {
+      showToast('Verify failed: ' + e.message, 'error');
+    } finally {
+      clearBusy(btn);
+    }
+  };
+
+  function markUnlinkedInPlace(anilistId) {
+    for (var i = 0; i < ENTRIES.length; i++) {
+      if (ENTRIES[i].anilist_id === anilistId) {
+        ENTRIES[i].arr_status = 'untracked';
+        ENTRIES[i].arr_service = '';
+        ENTRIES[i].sonarr_id = null;
+        ENTRIES[i].radarr_id = null;
+        ENTRIES[i].arr_has_file = false;
+        // Files on disk stay on disk — only the *arr link is gone.
+        ENTRIES[i].local_status = ENTRIES[i].folder_path ? 'have' : 'missing';
+        break;
+      }
+    }
+
+    var entry = null;
+    for (var j = 0; j < ENTRIES.length; j++) {
+      if (ENTRIES[j].anilist_id === anilistId) { entry = ENTRIES[j]; break; }
+    }
+    var title = (entry && entry.anilist_title) || '';
+    var hasFolder = !!(entry && entry.folder_path);
+
+    document.querySelectorAll('#tableBody tr').forEach(function(row) {
+      // The linked row is the one carrying this entry's unlink button.
+      var mark = row.querySelector('button[onclick*="unlinkFromArr(' + anilistId + ',"]');
+      if (!mark) return;
+
+      row.setAttribute('data-arr', 'untracked');
+      row.setAttribute('data-local', hasFolder ? 'have' : 'missing');
+
+      var cells = row.querySelectorAll('td');
+      if (cells[8]) {
+        cells[8].innerHTML = hasFolder
+          ? '<span class="local-have">Have</span>'
+          : '<span class="local-missing">Missing</span>';
+      }
+      if (cells[9]) cells[9].innerHTML = '';
+      if (cells[10]) {
+        var html = '<div class="action-btns">' +
+          '<button class="btn btn-secondary btn-xs" title="Add to Sonarr/Radarr" ' +
+          'onclick="previewAdd(' + anilistId + ',\'' + escAttr(title) + '\',this)">+ Add</button>';
+        if (hasFolder) {
+          html += '<button class="btn btn-secondary btn-xs" ' +
+            'title="Move this on-disk folder into its standardized library location" ' +
+            'onclick="openSmartMoveWl(' + anilistId + ',this)">Fix Location</button>';
+        }
+        cells[10].innerHTML = html + '</div>';
+      }
+    });
+
+    document.querySelectorAll('#gridView .media-card').forEach(function(card) {
+      var mark = card.querySelector('button[onclick*="unlinkFromArr(' + anilistId + ',"]');
+      if (!mark) return;
+      card.setAttribute('data-arr', 'untracked');
+      card.setAttribute('data-local', hasFolder ? 'have' : 'missing');
+    });
+  }
+
+  function escAttr(v) {
+    return String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  }
+
+  // Light up any row whose entry has since been linked in the background.
+  function reconcileLinkedRows(delays) {
+    (delays || [1500, 4000, 9000]).forEach(function(delay) {
+      setTimeout(function() {
+        fetch('/api/arr/linked')
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            var newly = 0;
+            ['sonarr', 'radarr'].forEach(function(svc) {
+              var map = (data && data[svc]) || {};
+              Object.keys(map).forEach(function(aidStr) {
+                var aid = parseInt(aidStr, 10);
+                // A row still offering "+ Add" hasn't been updated yet.
+                var stillUnlinked = document.querySelector(
+                  '#tableBody button[onclick*="previewAdd(' + aid + ',"]'
+                ) || document.querySelector(
+                  '#gridView button[onclick*="previewAdd(' + aid + ',"]:not([disabled])'
+                );
+                if (!stillUnlinked) return;
+                markLinkedInPlace(aid, svc, map[aidStr] && map[aidStr].arr_id);
+                newly++;
+              });
+            });
+            if (newly) {
+              showToast(
+                newly + ' related season' + (newly === 1 ? '' : 's') +
+                ' linked automatically', 'success'
+              );
+            }
+          })
+          .catch(function() { /* best-effort refresh */ });
+      }, delay);
+    });
+  }
+
+  // Linking only repoints *arr at files already in the library layout; it
+  // never moves anything. When the files are still in *arr's own folders the
+  // move is a separate, destructive step — so offer it here rather than
+  // running it silently, and rather than making the user revisit every entry.
+  function offerMoveToLibrary(anilistId, service, arrId) {
+    if (!arrId || (service !== 'sonarr' && service !== 'radarr')) return;
+    var url = '/api/download/' + service + '/' + arrId + '/reprocess?dry_run=true';
+    fetch(url, { method: 'POST' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (!data.ok) return;
+        var moves = (data.files || []).filter(function(f) { return f.action === 'move'; });
+        if (!moves.length) return;  // already filed correctly — nothing to offer
+        var sample = moves.slice(0, 3).map(function(f) { return '  ' + f.local_to; }).join('\n');
+        var more = moves.length > 3 ? '\n  …and ' + (moves.length - 3) + ' more' : '';
+        if (!confirm(
+          moves.length + ' file' + (moves.length === 1 ? '' : 's') +
+          ' for this entry are not in your library layout yet.\n\nMove them now?\n\n' +
+          sample + more
+        )) return;
+        showToast('Moving ' + moves.length + ' file' + (moves.length === 1 ? '' : 's') + '…', 'success');
+        fetch('/api/download/' + service + '/' + arrId + '/reprocess', { method: 'POST' })
+          .then(function(r) { return r.json(); })
+          .then(function(res) {
+            if (res.ok) {
+              showToast('Move complete — moved: ' + res.moved + ', skipped: ' + res.skipped +
+                (res.errors ? ', errors: ' + res.errors : ''), res.errors ? 'error' : 'success');
+            } else {
+              showToast('Move failed: ' + (res.error || 'unknown'), 'error');
+            }
+          })
+          .catch(function(e) { showToast('Move failed: ' + e.message, 'error'); });
+      })
+      .catch(function() { /* preview is best-effort — never block the add */ });
+  }
+
+  // Back-compat alias — the handler used to be Sonarr-only.
+  window.unlinkFromSonarr = function(anilistId, title) {
+    return window.unlinkFromArr(anilistId, title);
+  };
+
+  // "The files are there, *arr just hasn't noticed." No preview: nothing on
+  // disk changes, so there is nothing to approve.
+  window.rescanInArr = async function(anilistId, btn) {
+    setBusy(btn, 'Rescanning\u2026');
+    try {
+      var resp = await fetch('/api/import/entry/rescan-arr', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({anilist_id: anilistId})
+      });
+      var d = await resp.json();
+      if (!d.ok) { showToast(d.error || 'Rescan failed', 'error'); return; }
+      var arr = d.arr || {};
+      showToast(
+        (arr.service ? arr.service.charAt(0).toUpperCase() + arr.service.slice(1) : '*arr') +
+        ' rescanning' +
+        (arr.path_action === 'updated' ? ' (path corrected to ' + (arr.to || 'the library') + ')' : '') +
+        '. Give it a moment, then check whether the episodes still read as missing.',
+        'success');
+    } catch (e) {
+      showToast('Rescan failed: ' + e.message, 'error');
+    } finally {
+      clearBusy(btn);
+    }
+  };
+
+  // Sonarr can see the files but has no idea what they are: our S02 is its
+  // S01E13+. Translate the numbering and register it — no rename, no move.
+  window.mapEpisodesInSonarr = async function(anilistId, btn) {
+    // The chain walk hits AniList and Sonarr, so this can run for a while.
+    setBusy(btn, 'Checking\u2026');
+    try {
+      var resp = await fetch('/api/import/entry/map-episodes', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({anilist_id: anilistId, dry_run: true})
+      });
+      var d = await resp.json();
+      if (!d.ok) { showToast(d.error || 'Mapping failed', 'error'); return; }
+
+      var matched = d.matched || [];
+      var skipped = d.skipped || [];
+      var gaps = d.quality_gaps || [];
+      if (!matched.length) {
+        // Already mapped, but an earlier run may have left the quality blank —
+        // Sonarr never offers a file it already tracks, so only this can fix it.
+        if (gaps.length) {
+          if (!confirm(
+            'Everything is already mapped, but ' + gaps.length + ' file' +
+            (gaps.length === 1 ? ' has' : 's have') + ' no quality set in Sonarr:\n\n  ' +
+            gaps.slice(0, 5).map(function(g) {
+              return 'S' + String(g.sonarr_season).padStart(2, '0') +
+                     'E' + String(g.sonarr_episode).padStart(2, '0') + '  ' + g.file;
+            }).join('\n  ') +
+            (gaps.length > 5 ? '\n  \u2026and ' + (gaps.length - 5) + ' more' : '') +
+            '\n\nSet it from each file\u2019s media info? Nothing on disk is touched.'
+          )) return;
+          setBusy(btn, 'Setting\u2026');
+          var respQ = await fetch('/api/import/entry/map-episodes', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({anilist_id: anilistId, dry_run: false})
+          });
+          var dq = await respQ.json();
+          if (!dq.ok) { showToast(dq.error || 'Quality update failed', 'error'); return; }
+          var q0 = dq.quality || {};
+          showToast(
+            q0.updated
+              ? 'Quality set on ' + q0.updated + ' file' + (q0.updated === 1 ? '' : 's') + '.'
+              : 'No quality could be set' +
+                (q0.unresolved && q0.unresolved.length ? ' (' + q0.unresolved[0].reason + ').' : '.'),
+            q0.updated ? 'success' : 'error');
+          return;
+        }
+        var why = skipped.length
+          ? '\n\nSonarr listed ' + skipped.length + ' file(s) it could not use:\n  ' +
+            skipped.slice(0, 5).map(function(s) { return s.file + ' \u2014 ' + s.reason; }).join('\n  ')
+          : '\n\nEvery file for this entry is already registered with Sonarr, and all of them have a quality set.';
+        showToast('Nothing to do.' + why, skipped.length ? 'error' : 'success');
+        return;
+      }
+
+      var sample = matched.slice(0, 5).map(function(m) {
+        return '  ' + m.file + '\n      \u2192 S' + String(m.sonarr_season).padStart(2, '0') +
+               'E' + String(m.sonarr_episode).padStart(2, '0') +
+               (m.episode_title ? '  ' + m.episode_title : '');
+      }).join('\n');
+      var more = matched.length > 5 ? '\n  \u2026and ' + (matched.length - 5) + ' more' : '';
+      var skipNote = skipped.length ? '\n\nSkipping ' + skipped.length + ' file(s): ' +
+        skipped.slice(0, 3).map(function(s) { return s.file + ' (' + s.reason + ')'; }).join(', ') : '';
+
+      if (!confirm(
+        'Register ' + matched.length + ' file' + (matched.length === 1 ? '' : 's') +
+        ' with Sonarr as ' + (d.series_title || 'this series') + ' episodes?\n\n' +
+        'Nothing is renamed or moved \u2014 the files stay exactly where they are.\n\n' +
+        sample + more + skipNote
+      )) return;
+
+      setBusy(btn, 'Mapping\u2026');
+      var resp2 = await fetch('/api/import/entry/map-episodes', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({anilist_id: anilistId, dry_run: false})
+      });
+      var d2 = await resp2.json();
+      if (!d2.ok) { showToast(d2.error || 'Mapping failed', 'error'); return; }
+      var q = d2.quality || {};
+      var qNote = q.updated
+        ? ' Quality set on ' + q.updated + ' of them from their media info.'
+        : '';
+      if (q.unresolved && q.unresolved.length) {
+        qNote += ' Quality left unset on ' + q.unresolved.length + ' (' +
+                 q.unresolved[0].reason + ').';
+      }
+      showToast(
+        'Registered ' + d2.imported + ' file' + (d2.imported === 1 ? '' : 's') +
+        ' with Sonarr.' + qNote,
+        'success');
+    } catch (e) {
+      showToast('Mapping failed: ' + e.message, 'error');
+    } finally {
+      clearBusy(btn);
+    }
+  };
+
+  // Files dropped into an entry's folder by hand: preview first, then file
+  // them and tell *arr, so the episodes stop reading as missing.
+  window.rescanEntryFolder = async function(anilistId, btn) {
+    setBusy(btn, 'Scanning\u2026');
+    try {
+      var resp = await fetch('/api/import/entry/preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({anilist_id: anilistId})
+      });
+      var d = await resp.json();
+      if (!d.ok) { showToast(d.error || 'Preview failed', 'error'); return; }
+      if (!d.moves || !d.moves.length) {
+        showToast(
+          (d.warnings && d.warnings.length)
+            ? d.warnings.join('\n')
+            : 'Nothing to file — everything in that folder is already in place.',
+          'success');
+        return;
+      }
+      var lines = ['File ' + d.moves.length + ' item(s) into ' + (d.target_folder || 'the library') + '?'];
+      d.moves.slice(0, 6).forEach(function(m) { lines.push('  → ' + m.to); });
+      if (d.moves.length > 6) lines.push('  …and ' + (d.moves.length - 6) + ' more');
+      (d.warnings || []).forEach(function(w) { lines.push('! ' + w); });
+      if (!confirm(lines.join('\n'))) return;
+
+      btn.textContent = 'Filing\u2026';
+      var r2 = await fetch('/api/import/entry/execute', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({anilist_id: anilistId})
+      });
+      var res = await r2.json();
+      if (!res.ok) { showToast(res.error || 'Import failed', 'error'); return; }
+      var arr = res.arr || {};
+      var note = arr.service
+        ? (arr.error ? ' — ' + arr.service + ' notify failed: ' + arr.error
+                     : ' — ' + arr.service + ' rescanned')
+        : ' — not linked to Sonarr/Radarr';
+      showToast('Filed ' + res.moved + ' file(s)' + note, res.errors ? 'error' : 'success');
+    } catch (e) {
+      showToast('Re-scan failed: ' + e.message, 'error');
+    } finally {
+      clearBusy(btn);
+    }
+  };
+
+  window.reprocessEntry = async function(service, arrId, btn, dryRun) {
+    setBusy(btn, dryRun ? 'Previewing\u2026' : 'Moving\u2026');
     var url = '/api/download/' + service + '/' + arrId + '/reprocess' + (dryRun ? '?dry_run=true' : '');
     try {
       var resp = await fetch(url, {method: 'POST'});
@@ -1422,10 +1942,120 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     } catch(e) {
       showToast('Reprocess error: ' + e.message, 'error');
     } finally {
-      btn.disabled = false;
-      btn.textContent = orig;
+      clearBusy(btn);
     }
   };
+
+  // ---------------------------------------------------------------------------
+  // Smart Move (Fix Location) — restructure an on-disk entry not tracked in *arr
+  // ---------------------------------------------------------------------------
+  var _smartMoveWl = { anilistId: null };
+
+  window.openSmartMoveWl = function(anilistId, btn) {
+    _smartMoveWl.anilistId = anilistId;
+    var body = document.getElementById('smartMoveWlBody');
+    var confirmBtn = document.getElementById('smartMoveWlConfirm');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Move';
+    body.innerHTML = '<p style="color:var(--text-muted,#666);font-size:0.85rem;">Analyzing…</p>';
+    document.getElementById('smartMoveModal').classList.remove('hidden');
+    fetch('/api/smart-move/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ anilist_id: anilistId })
+    }).then(function(r) { return r.json(); })
+      .then(renderSmartMoveWl)
+      .catch(function() {
+        body.innerHTML = '<p style="color:#c62828;font-size:0.85rem;">Preview failed.</p>';
+      });
+  };
+
+  function renderSmartMoveWl(data) {
+    var body = document.getElementById('smartMoveWlBody');
+    var confirmBtn = document.getElementById('smartMoveWlConfirm');
+    if (data.error) {
+      body.innerHTML = '<p style="color:#c62828;font-size:0.85rem;">' + escHtml(data.error) + '</p>';
+      return;
+    }
+    if (!data.needs_move) {
+      body.innerHTML = '<p style="font-size:0.9rem;">✓ Already in the correct location.</p>' +
+        '<p style="color:var(--text-muted,#666);font-size:0.8rem;word-break:break-all;">' +
+        escHtml(data.current_folder || '') + '</p>';
+      return;
+    }
+    var extra = data.support_file_count
+      ? ' and clean up ' + data.support_file_count + ' leftover metadata file(s)' : '';
+    body.innerHTML =
+      '<p style="margin-bottom:0.6rem;font-size:0.9rem;">This will move <strong>' + data.file_count +
+        '</strong> file(s)' + extra + ':</p>' +
+      '<div style="font-size:0.82rem;">' +
+        '<div style="margin-bottom:0.4rem;"><span style="color:var(--text-muted,#888);">From:</span><br>' +
+          '<span style="word-break:break-all;">' + escHtml(data.current_folder) + '</span></div>' +
+        '<div><span style="color:var(--text-muted,#888);">To:</span><br>' +
+          '<span style="word-break:break-all;color:var(--accent,#4a90d9);">' + escHtml(data.target_folder) + '</span></div>' +
+      '</div>';
+    confirmBtn.disabled = false;
+  }
+
+  window.closeSmartMoveWl = function() {
+    document.getElementById('smartMoveModal').classList.add('hidden');
+    _smartMoveWl.anilistId = null;
+  };
+
+  window.confirmSmartMoveWl = function() {
+    if (!_smartMoveWl.anilistId) return;
+    var confirmBtn = document.getElementById('smartMoveWlConfirm');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Moving…';
+    fetch('/api/smart-move/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ anilist_id: _smartMoveWl.anilistId })
+    }).then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.ok) {
+          document.getElementById('smartMoveModal').classList.add('hidden');
+          showToast('Moved ' + (data.moved || 0) + ' file(s) into place', 'success');
+        } else {
+          showToast('Move failed: ' + (data.error || 'unknown'), 'error');
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = 'Move';
+        }
+      })
+      .catch(function(e) {
+        showToast('Request failed: ' + e.message, 'error');
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Move';
+      });
+  };
+
+  // Copy helper that works on non-secure (plain HTTP LAN) origins too, where
+  // navigator.clipboard is undefined. Falls back to a hidden-textarea execCommand.
+  function copyTextToClipboard(text, onDone) {
+    function finish() { if (typeof onDone === 'function') onDone(); }
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(finish, function() { legacyCopy(text, finish); });
+    } else {
+      legacyCopy(text, finish);
+    }
+  }
+
+  function legacyCopy(text, finish) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      finish();
+    } catch (_) { /* clipboard unavailable */ }
+  }
 
   function showToast(msg, type) {
     var container = document.getElementById('toastContainer');
@@ -1445,8 +2075,7 @@ var TITLE_DISPLAY = {{ title_display | tojson }};
     copyBtn.style.cssText = 'background:none;border:none;cursor:pointer;color:inherit;opacity:0.9;font-size:0.95rem;padding:0 0.15rem;line-height:1';
     copyBtn.onclick = function(e) {
       e.stopPropagation();
-      if (!navigator.clipboard) return;
-      navigator.clipboard.writeText(msg).then(function() {
+      copyTextToClipboard(msg, function() {
         copyBtn.textContent = '✓';
         setTimeout(function() { copyBtn.textContent = '📋'; }, 1200);
       });

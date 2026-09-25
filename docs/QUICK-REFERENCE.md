@@ -1,552 +1,255 @@
-# Quick Reference: Best Practices
+# Quick Reference: Anilist-Link
 
-> One-page guide to Git workflow, Claude Code usage, and Docker optimization for Anilist-Link
-
----
-
-## Git Workflow Best Practices
-
-### DO: Use `git pull --rebase`
-```bash
-# Set up alias for convenience
-git config --global alias.pr 'pull --rebase'
-
-# Use it when your push is rejected
-git pr
-# or
-git pull --rebase
-```
-
-**Why**: Maintains linear commit history, avoids messy merge commits
-
-### DO: Handle rebase conflicts properly
-```bash
-# If conflicts occur during rebase, you can:
-
-# Option 1: Abort and use regular merge
-git rebase --abort
-git pull  # Creates merge commit but easier to resolve
-
-# Option 2: Fix conflicts during rebase
-# [fix conflicts in files]
-git add .
-git rebase --continue
-```
-
-### DON'T: Use `git pull` alone
-Avoid `git pull` by itself when remote is ahead - it creates unnecessary merge commits
+> The commands, variables, paths and endpoints of this project. This file owns these
+> tables. Other documents link here and do not repeat them.
 
 ---
 
-## Claude Code: Essential Commands
+## Daily commands
 
-### Bash Mode
 ```bash
-# Run any bash command directly
-"run pytest"
-"check the logs in /config"
+# Container
+docker compose up -d                  # start
+docker compose down                   # stop
+docker compose pull                   # get the newest image
+docker logs -f AnilistLink            # follow the container log
+docker exec AnilistLink tail -f /config/logs/anilist_link.log   # follow the app log
+
+# Local development (Python 3.12 venv in .venv/)
+pip install -e ".[dev]"               # install with dev tools
+python -m src.Main                    # run on http://localhost:9876
+
+# Tests
+pytest                                # all tests
+pytest tests/Unit/test_title_matcher.py -x   # one file, stop on the first failure
+pytest --cov=src                      # with coverage
+
+# Lint and format (run black first, then ruff)
+black src/
+ruff check src/                       # add --fix for imports and unused names
+mypy src/
+
+# Image
+docker build -t anilist-link .                                # release variant
+docker build --build-arg BUILD_VARIANT=dev -t anilist-link .  # dev variant, adds dev-tools and sqlite3
 ```
 
-### Model Switching
-```bash
-/model opus    # Powerful, for complex tasks
-/model sonnet  # Fast and efficient, for daily work
+Start the app through `src.Main`. `src/Web/App.py` has no module-level `app`, so
+`uvicorn src.Web.App:app` does not work.
+
+## Image and tags
+
+Image: `ghcr.io/anothermike-exe/anilist-link`
+
+| Tag | Built from | Variant |
+|---|---|---|
+| `latest` | push to `main`, and each `v*` tag | release |
+| `1.0.0` (semver) | a `v1.0.0` tag | release |
+| `dev` | push to `dev` | dev (adds `/config/dev-tools/` scripts and `sqlite3`) |
+
+Platforms: `linux/amd64` and `linux/arm64`.
+
+## Endpoints and ports
+
+The dashboard and the API use port `9876` (TCP). Change it with `PORT`.
+
+| What | Where |
+|---|---|
+| Dashboard | `http://localhost:9876/` |
+| First-run wizard | `/onboarding` (the dashboard sends you here until onboarding is complete. Add `?skip_onboarding=1` to go past it) |
+| Settings | `/settings` |
+| OpenAPI docs | `/docs` |
+| System status | `GET /api/status` |
+| Background task progress | `GET /api/progress` |
+| AniList availability | `GET /api/anilist/status`, `POST /api/anilist/check-now` |
+| AniList account link | `GET /auth/anilist`, callback at `/auth/anilist/callback` |
+| Connection tests | `POST /api/test/{anilist,plex,jellyfin,crunchyroll,sonarr,radarr}` |
+| Library browsers | `/library`, `/plex`, `/jellyfin` |
+| File restructure wizard | `/restructure` |
+| Import of hand-fetched media | `/import` |
+| Manual overrides | `/mappings` |
+| Crunchyroll sync | `/crunchyroll`, `/crunchyroll/preview`, `/crunchyroll/history` |
+| Plex and Jellyfin watch sync | `/watch-sync` |
+| AniList watchlist | `/watchlist` |
+| Downloads | `/download` |
+| Admin tools | `/tools` |
+| Sonarr webhook target | `POST /api/webhook/sonarr` |
+| Radarr webhook target | `POST /api/webhook/radarr` |
+| Jellyfin webhook target | `POST /jellyfin/webhook` |
+| Glance widget (key required) | `GET /glance/rate-completed?key=<key>` |
+
+The routes are in `src/Web/Routes/`. `/docs` lists every one.
+
+## Configuration
+
+### Container variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PUID` / `PGID` | `99` / `100` | Host user and group that own the volumes and the media (`id -u`, `id -g`). `99`/`100` is `nobody`/`users` on Unraid |
+| `UMASK` | `002` | File creation mask. `002` gives group-writable files |
+| `TZ` | `UTC` | Time zone for the dashboard and the scheduled jobs, for example `America/New_York` |
+| `DEBUG` | `false` | Verbose logs |
+| `PORT` | `9876` | Listen port |
+| `HOST` | `0.0.0.0` | Listen address |
+
+### Application variables
+
+You do not need these. The onboarding wizard and `/settings` save each value in the
+database. If you set a variable, it overrides the database value and the settings page
+shows the field as locked. The priority is: environment variable, then the database
+setting, then the default.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ANILIST_CLIENT_ID` / `ANILIST_CLIENT_SECRET` | — | AniList OAuth app. Register it at [anilist.co/settings/developer](https://anilist.co/settings/developer) with the redirect URL `http://<host>:9876/auth/anilist/callback` |
+| `APP_BASE_URL` | `http://localhost:9876` | The URL other services use to reach this app (webhooks) |
+| `PLEX_URL` / `PLEX_TOKEN` | — | Plex server |
+| `PLEX_ANIME_LIBRARIES` | `[]` | JSON list of Plex library keys to scan |
+| `PLEX_WATCH_SYNC_ENABLED` | `false` | Plex watch sync |
+| `JELLYFIN_URL` / `JELLYFIN_API_KEY` | — | Jellyfin server |
+| `JELLYFIN_ANIME_LIBRARY_IDS` | `[]` | JSON list of Jellyfin library IDs to scan |
+| `JELLYFIN_WATCH_SYNC_ENABLED` | `false` | Jellyfin watch sync |
+| `CRUNCHYROLL_EMAIL` / `CRUNCHYROLL_PASSWORD` | — | Crunchyroll account |
+| `FLARESOLVERR_URL` | — | Optional FlareSolverr for the Crunchyroll login |
+| `HEADLESS_MODE` | `true` | Run Chromium without a window |
+| `MAX_PAGES` | `10` | Crunchyroll history pages to read for each sync |
+| `CR_AUTO_SYNC_ENABLED` | `true` | Scheduled Crunchyroll sync |
+| `CR_AUTO_APPROVE` | `true` | Apply Crunchyroll changes without a manual preview approval |
+| `CR_SYNC_TIME` | `02:00` | Daily time for the Crunchyroll sync (`HH:MM`). If it is empty, the sync runs each `SYNC_INTERVAL` minutes |
+| `SONARR_URL` / `SONARR_API_KEY` | — | Sonarr server |
+| `SONARR_ANIME_ROOT_FOLDER` | — | Sonarr root folder for anime |
+| `SONARR_PATH_PREFIX` / `SONARR_LOCAL_PATH_PREFIX` | — | The same directory as Sonarr sees it, and as this container sees it |
+| `RADARR_URL` / `RADARR_API_KEY` | — | Radarr server |
+| `RADARR_ANIME_ROOT_FOLDER` | — | Radarr root folder for anime |
+| `RADARR_PATH_PREFIX` / `RADARR_LOCAL_PATH_PREFIX` | — | The same directory as Radarr sees it, and as this container sees it |
+| `SYNC_INTERVAL` | `15` | Minutes between Crunchyroll syncs when `CR_SYNC_TIME` is empty. Plex and Jellyfin watch syncs run each 15 minutes, a fixed value |
+| `SCAN_INTERVAL` | `24` | Hours between scheduled Plex metadata scans |
+| `LIBRARY_REINDEX_INTERVAL` | `6` | Hours between library reindexes |
+| `WATCHLIST_REFRESH_INTERVAL` | `30` | Minutes between AniList watchlist refreshes. The refresh runs at startup, then only while the dashboard has recent activity, and during long syncs |
+| `DOWNLOAD_SYNC_INTERVAL` | `60` | Minutes between watchlist-to-Sonarr/Radarr syncs |
+| `DOWNLOAD_AUTO_STATUSES` | `CURRENT` | Comma-separated AniList statuses to add to Sonarr/Radarr on their own |
+| `DOWNLOAD_MONITOR_MODE` | `future` | Sonarr monitor mode for new series |
+| `DOWNLOAD_AUTO_SEARCH` | `false` | Start a search when a series is added |
+| `TITLE_DISPLAY` | `romaji` | Title language in the dashboard |
+| `APP_SHOW_UNRATED_COMPLETED` | `true` | Show the "Rate Your Completed Shows" card |
+| `LIBRARY_IMPORT_PATH` | — | Folder that `/import` reads, for example `/media/import` |
+| `LIBRARY_SPLIT_MOVIES_TV` | `false` | Put movies and TV in different output folders |
+| `LIBRARY_MOVIE_OUTPUT_PATH` / `LIBRARY_TV_OUTPUT_PATH` | — | The output folders when the split is on |
+| `NAMING_FILE_TEMPLATE` | `{title} - S{season}E{episode}` | Episode file name |
+| `NAMING_FOLDER_TEMPLATE` | `{title}` | Show folder name |
+| `NAMING_SEASON_FOLDER_TEMPLATE` | `Season {season}` | Season folder name |
+| `NAMING_MOVIE_FILE_TEMPLATE` | `{title} [{year}]` | Movie file name |
+| `NAMING_ILLEGAL_CHAR_REPLACEMENT` | — | Replacement for characters a file system does not accept |
+
+The full map of settings keys to variables is `SETTINGS_MAP` in `src/Utils/Config.py`.
+
+## Paths
+
+| Path | Holds |
+|---|---|
+| `/config` | `anilist_link.db` (SQLite), `logs/anilist_link.log`, the Chromium profile for Crunchyroll, and `dev-tools/` on a dev image |
+| `/data` | Reserved. The image declares it, but the app does not use it |
+| `/media/anime` | Your anime library. Use the same container path that Plex or Jellyfin uses. It must be writable by `PUID:PGID` |
+| `/media/import` | Optional. A drop folder for media you got by hand. Set `LIBRARY_IMPORT_PATH` to it |
+
+The library path under `/media` is not fixed. Use any path, but make it agree with
+your media server:
+
+```
+Host:          /mnt/user/media/anime
+Plex:          /mnt/user/media/anime -> /media/anime
+Jellyfin:      /mnt/user/media/anime -> /media/anime
+Anilist-Link:  /mnt/user/media/anime -> /media/anime   <- must match
 ```
 
-### Auto-Accept Mode
-```bash
-/auto-accept on   # Claude makes changes without prompting
-/auto-accept off  # Review each change
-```
-
-### Interrupt Claude
-Press `ESC` to interrupt and redirect Claude's actions
-
-### Documentation
-```bash
-"Explore the app architecture and update ARCHITECTURE.md"
-```
-
----
-
-## Claude Code: Workflow by Level
-
-### Level 1: Beginner
-
-**Essential Setup**:
-- Install Claude Code (local or remote)
-- Verify `CLAUDE.md` exists for project memory
-- Use to-do lists for task tracking
-
-**Basic Commands**:
-```bash
-"Create a to-do list for adding Jellyfin webhook support"
-"Write unit tests for the TitleMatcher class"
-"Debug this AniList API error [paste error]"
-```
-
-**Best Practices**:
-- Use markdown files for long prompts (reference with `@filename.md`)
-- Let Claude generate and maintain `CLAUDE.md`
-- Add tasks to message queue while Claude works
-
----
-
-### Level 2: Intermediate
-
-**Planning & Strategy**:
-```bash
-# Use planning mode
-/plan "How should we implement the Plex metadata scanner?"
-
-# Control thinking depth
-"think about the best approach for title matching"
-"think hard about edge cases in season mapping"
-"ultra think about OAuth2 token refresh flow"
-```
-
-**Beyond Code**:
-- Research: "Research AniList GraphQL API and create integration plan"
-- Documents: "Generate API documentation for the mapping endpoints"
-- Changelogs: "Update CHANGELOG.md with recent changes"
-
-**GitHub Integration**:
-- Install GitHub Actions integration
-- Tag issues with `@claude` for automatic fixing
-
-**Mindset Shift**:
-- Think like a PM: Give context and constraints
-- Verify at high level (app works, tests pass)
-- Not line-by-line code review
-
----
-
-### Level 3: Master
-
-**Parallel Work**:
-```bash
-# Multiple plans simultaneously
-/subagents parallel "Explore 3 approaches to rate limiting"
-
-# Multi-Claude with Git worktrees
-git worktree add ../feature-plex feature/plex-integration
-git worktree add ../feature-jellyfin feature/jellyfin-integration
-# Run separate Claude instances in each
-```
-
-**MCP Servers**:
-- Playwright MCP: Browser automation for testing the web dashboard
-
----
-
-## Docker: Binhex Standardization
-
-### Standard Volume Structure
-All containers follow consistent paths:
-```yaml
-volumes:
-  - /host/path/appdata/AnilistLink:/config    # Config, database, logs
-  - /host/path/data:/data                      # Application data
-```
-
-### Standard Environment Variables
-```yaml
-environment:
-  # User/Group Management (prevents permission issues)
-  - PUID=1000              # Your user ID: id -u
-  - PGID=1000              # Your group ID: id -g
-  - UMASK=002              # File permissions (002 = group writable)
-
-  # System Configuration
-  - TZ=America/New_York    # Timezone
-  - DEBUG=false            # Enable debug logging
-
-  # Application-Specific
-  - PLEX_URL=http://192.168.1.100:32400
-  - PLEX_TOKEN=your-plex-token
-  - JELLYFIN_URL=http://192.168.1.100:8096
-  - JELLYFIN_API_KEY=your-jellyfin-api-key
-  - ANILIST_CLIENT_ID=your-client-id
-  - ANILIST_CLIENT_SECRET=your-client-secret
-  # P4 Download Management (optional)
-  - SONARR_URL=http://192.168.1.100:8989
-  - SONARR_API_KEY=your-sonarr-api-key
-  - RADARR_URL=http://192.168.1.100:7878
-  - RADARR_API_KEY=your-radarr-api-key
-```
-
-**UMASK Values:**
-- `000` = 777/666 (most permissive)
-- `002` = 775/664 (recommended - group writable)
-- `022` = 755/644 (user only)
-
-### Standard Logging
-- **All logs**: `/config/supervisord.log`
-- **App logs**: `/config/anilist_link.log`
-- **View logs**: `docker exec AnilistLink cat /config/supervisord.log`
-- Supervisord manages all container processes
-
-### Quick Setup
-```bash
-# Find your PUID/PGID
-id -u    # Returns PUID (e.g., 1000)
-id -g    # Returns PGID (e.g., 1000)
-
-# Docker run with Binhex standards
-docker run -d \
-  --name AnilistLink \
-  -v $(pwd)/config:/config \
-  -v $(pwd)/data:/data \
-  -e PUID=$(id -u) \
-  -e PGID=$(id -g) \
-  -e UMASK=002 \
-  -e TZ=America/New_York \
-  -p 9876:9876 \
-  anilist-link
-
-# Docker Compose
-docker-compose up -d
-```
-
----
-
-## Docker Optimization Checklist
-
-### 1. Minimal Base Image
-```dockerfile
-# Good
-FROM python:3.11-alpine
-
-# Avoid
-FROM python:latest
-FROM ubuntu:latest
-```
-
-### 2. Layer Caching
-```dockerfile
-# Good - dependencies first (change less often)
-COPY pyproject.toml ./
-RUN pip install .
-COPY . .
-
-# Avoid - code copied before dependencies
-COPY . .
-RUN pip install .
-```
-
-### 3. .dockerignore File
-```
-.git
-.venv
-__pycache__
-*.pyc
-.env
-*.log
-coverage
-.DS_Store
-.idea
-_resources
-tests
-docs
-```
-
-### 4. Combined RUN Commands
-```dockerfile
-# Good - single layer, cleanup included
-RUN apk add --no-cache gcc musl-dev && \
-    pip install --no-cache-dir -r requirements.txt && \
-    apk del gcc musl-dev
-
-# Avoid - multiple layers
-RUN apk add gcc musl-dev
-RUN pip install -r requirements.txt
-RUN apk del gcc musl-dev
-```
-
-### 5. Multi-Stage Builds
-```dockerfile
-# Build stage
-FROM python:3.11-alpine AS build
-WORKDIR /app
-COPY pyproject.toml ./
-RUN pip install --no-cache-dir .
-COPY . .
-
-# Production stage
-FROM python:3.11-alpine
-WORKDIR /app
-COPY --from=build /app .
-CMD ["python", "-m", "src.Main"]
-```
-
----
-
-## Local Manual Testing
-
-### Starting the App
-```bash
-# Activate venv and run
-.venv/bin/python -m src.Main
-
-# Or with hot reload (development)
-.venv/bin/uvicorn src.Web.App:app --reload --port 9876
-```
-
-### Verifying Endpoints
-```bash
-# Dashboard
-curl -s -o /dev/null -w "%{http_code}" http://localhost:9876/
-# Expected: 200
-
-# Settings page
-curl -s -o /dev/null -w "%{http_code}" http://localhost:9876/settings
-# Expected: 200
-
-# API status
-curl -s http://localhost:9876/api/status | python3 -m json.tool
-# Expected: JSON with status, version, mapping_count, etc.
-
-# Plex scan preview (requires Plex configured, otherwise 303 redirect)
-curl -s -X POST -o /dev/null -w "%{http_code}" -H "Accept: text/html" http://localhost:9876/scan/plex/preview
-# Expected: 200 (Plex configured) or 303 (not configured)
-
-# Plex scan (no preview, background)
-curl -s -X POST -o /dev/null -w "%{http_code}" -H "Accept: text/html" http://localhost:9876/api/scan/plex
-# Expected: 303 redirect to dashboard with message
-
-# Static assets
-curl -s -o /dev/null -w "%{http_code}" http://localhost:9876/static/style.css
-# Expected: 200
-```
-
-### Testing Plex Scan Preview Flow
-1. Go to **Settings** (`http://localhost:9876/settings`)
-2. Enter Plex URL and Token, save
-3. Reload Settings — anime library checkboxes should appear under "Anime Libraries"
-4. Select desired libraries, save again
-5. Go to **Dashboard** (`http://localhost:9876/`)
-6. Click **Preview Scan** — should show matched/unmatched/skipped tables
-7. Click **Apply All** — writes metadata and redirects to dashboard with success message
-
----
-
-## Testing Best Practices
-
-### Running Tests
-```bash
-# All tests
-pytest
-
-# Unit tests only
-pytest tests/Unit/
-
-# Integration tests only
-pytest tests/Integration/
-
-# With coverage
-pytest --cov=src --cov-report=html
-
-# Stop on first failure
-pytest -x
-
-# Verbose output
-pytest -v
-```
-
-### Test Generation with Claude
-```bash
-"Write unit tests for the AnilistClient class"
-"Generate integration tests for the metadata scanner pipeline"
-"Add test coverage for title matching edge cases"
-```
-
-### Debugging with Tests
-```bash
-"Write a test that reproduces this AniList rate limiting bug"
-"Add test coverage for the OAuth2 token refresh flow"
-```
-
----
-
-## Common Claude Code Prompts for Anilist-Link
-
-### Architecture & Planning
-```
-"Explain how the title matching engine works"
-"Create a technical design doc for the Jellyfin integration"
-"What's the best approach to implement season-to-AniList-ID mapping?"
-"think hard about the architecture before implementing"
-```
-
-### Code Generation
-```
-"Implement the Plex webhook handler with tests"
-"Add the metadata scanner pipeline for Jellyfin"
-"Create the AniList OAuth2 flow endpoints"
-"Implement rate limiting for the AniList client"
-```
-
-### Debugging
-```
-"Debug this AniList API error: [paste error]"
-"Why is the title matching returning low confidence scores?"
-"Add logging to help debug the Plex sync issue"
-```
-
-### Documentation
-```
-"Generate API documentation for the dashboard endpoints"
-"Update ARCHITECTURE.md with the new Jellyfin client"
-"Document the manual override workflow"
-```
-
----
-
-## Project Organization
-
-### Folder Structure
-```
-├── README.md              # Main project docs (root only)
-├── CLAUDE.md              # Symlink to docs/CLAUDE.md
-├── _resources/            # NOT in git - dev references
-│   ├── Examples/          # API response samples
-│   ├── Research/          # Crunchyroll API notes, comparisons
-│   ├── Assets/            # Design mockups, diagrams
-│   └── Notes/             # Dev notes, scratchpad
-└── docs/                  # All other documentation
-    ├── ARCHITECTURE.md    # Required - system design
-    ├── CLAUDE.md          # Actual file location
-    ├── DEV-SETUP.md       # Developer setup guide
-    ├── QUICK-REFERENCE.md # This file
-    └── PROJECT-STRUCTURE.md # Project structure reference
-```
-
-### Documentation Rules
-1. **README.md stays in root** - Main project overview only
-2. **All other docs in `/docs`** - Keeps root clean
-3. **ARCHITECTURE.md required** - Document system design from start
-4. **CLAUDE.md in docs/** - Symlinked to root for auto-detection
-5. **`_resources/` NOT in git** - Add to .gitignore
-
----
-
-## Naming Conventions
-
-### Code Naming (Python with PascalCase Files)
-- **Files**: `PascalCase` (e.g., `AnilistClient.py`, `TitleMatcher.py`)
-- **Directories**: `PascalCase` (e.g., `Clients/`, `Matching/`, `Scanner/`)
-- **Variables**: `snake_case` (e.g., `user_data`, `match_score`) — PEP 8 standard
-- **Functions**: `snake_case` (e.g., `get_user_by_id`, `match_title`) — PEP 8 standard
-- **Classes**: `PascalCase` (e.g., `AnilistClient`, `TitleMatcher`)
-- **Constants**: `UPPER_SNAKE_CASE` (e.g., `MAX_RETRIES`, `API_BASE_URL`)
-
-### Environment Variables
-Always use `UPPER_SNAKE_CASE`:
-- `PUID`, `PGID`, `UMASK`, `TZ` (Binhex standards)
-- `PLEX_URL`, `PLEX_TOKEN`, `JELLYFIN_URL`, `JELLYFIN_API_KEY`
-- `ANILIST_CLIENT_ID`, `ANILIST_CLIENT_SECRET`
-- `DEBUG`
-- `SONARR_URL`, `SONARR_API_KEY` (P4)
-- `RADARR_URL`, `RADARR_API_KEY` (P4)
-
-### Docker Names
-- **Images**: `lowercase-with-dashes` (e.g., `anilist-link:latest`)
-- **Containers**: `PascalCase` (e.g., `AnilistLink`)
-- **Networks**: `PascalCase` (e.g., `AnilistNetwork`)
-
----
-
-## Configuration Files Priority
-
-Create these files/folders for optimal Claude Code experience:
-
-1. **docs/CLAUDE.md** (Required)
-   - Project memory and rules
-   - Symlink to root for Claude auto-detection
-
-2. **docs/ARCHITECTURE.md** (Required)
-   - System architecture documentation
-   - Design decisions and rationale
-
-3. **_resources/** (Recommended)
-   - Development reference materials
-   - NOT in git (add to .gitignore)
-
-4. **.dockerignore** (Required for Docker)
-   - Reduces build context
-   - Speeds up builds
-
-5. **.gitignore**
-   - Must include `_resources/`
-   - Exclude generated files
-
----
+Logs: `docker logs AnilistLink` shows the container output. The app log is
+`/config/logs/anilist_link.log`, which rotates at 5 MB and keeps three old files.
+There is no supervisord.
+
+## Glance integration
+
+The "Rate Your Completed Shows" card can show in a
+[Glance](https://github.com/glanceapp/glance) dashboard as an `iframe` widget.
+
+1. In Anilist-Link, go to **Settings → Integrations** and click **Generate key**.
+2. Click **Copy Glance snippet**.
+3. Paste the first part of the snippet into `glance.yml`, under the top-level
+   `document.head`. This listener resizes the iframe to its content. You add it one
+   time, for all widgets of this type:
+
+   ```yaml
+   document:
+     head: |
+       <script>
+       window.addEventListener('message', function (event) {
+         if (!event.data || event.data.source !== 'anilist-link-glance') return;
+         document.querySelectorAll('iframe[src*="/glance/rate-completed"]').forEach(function (frame) {
+           var h = Math.max(60, event.data.height + 20);
+           frame.style.height = h + 'px';
+           frame.setAttribute('height', h);
+         });
+       });
+       </script>
+   ```
+
+4. Paste the second part under the page or column that must show the card:
+
+   ```yaml
+   - type: iframe
+     title: Rate Completed Shows
+     source: http://<your-anilist-link-host>:9876/glance/rate-completed?key=<your-key>
+     height: 60   # start value. The listener changes it after the page loads
+   ```
+
+5. Restart Glance.
+
+The widget lists each AniList entry that is Completed and has no score. You can rate
+it from the tile. The background is transparent, so the tile uses your Glance theme.
+
+`/glance/*` is the only route that needs a key. The rest of the app trusts the local
+network. When you generate a new key, the old key stops working immediately.
 
 ## Troubleshooting
 
-### Claude doesn't follow project conventions
-- Add explicit rules to `CLAUDE.md` with examples
+### Renames or moves fail with "permission denied"
+→ `PUID` and `PGID` must own the media on the host: `ls -ln /mnt/user/media/anime`
+→ The entrypoint changes the owner of `/config` only. It does not change the media
+library.
 
-### Tests keep failing
-- Verify `pytest-asyncio` is installed for async test support
-- Check that test fixtures match current database schema
+### The restructurer cannot find the files that Plex or Jellyfin reports
+→ The media is mounted at a different container path here than in the media server.
+Mount it at the same path. See [Paths](#paths).
+→ For Sonarr and Radarr, set the remote path and the local path under
+**Settings → Sonarr** or **Settings → Radarr**.
 
-### Code quality issues
-- Run `ruff check --fix src/` to auto-fix common issues
-- Run `mypy src/` for type errors
+### Crunchyroll login fails or Chromium crashes
+→ Set `shm_size: "2g"` in compose. The default shared memory is too small for Chromium.
+→ Read `/config/logs/anilist_link.log` for the Selenium error. The Crunchyroll API is
+not official, and it can change without notice.
 
-### Git history getting messy
-- Configure `git pull --rebase` as default
-- Use `git pr` alias consistently
+### A banner says that AniList is down
+→ AniList disabled its API or decreased its rate limit. Scans and syncs pause.
+→ Anilist-Link checks one time each hour. Click **Check now** in the banner to check
+immediately. You do not need to restart anything.
 
-### Docker builds are slow
-- Review layer caching order (dependencies before code)
-- Add comprehensive `.dockerignore`
-- Implement multi-stage builds
+### Timestamps show the wrong hour
+→ Set `TZ` to a valid zone name. At startup the entrypoint logs
+`unknown timezone '<name>' - staying on UTC` if the name is wrong.
 
-### Docker permission errors
-- Set `PUID` and `PGID` to match your user: `id -u` and `id -g`
-- Use `UMASK=002` for shared group access
-- Check ownership: `docker exec AnilistLink ls -la /config`
+### A Crunchyroll season went to the wrong AniList entry
+→ Follow [SEASON-MAPPING-REPAIR.md](SEASON-MAPPING-REPAIR.md).
 
-### AniList rate limiting (429 errors)
-- Check that the rate limiter in `AnilistClient.py` is active
-- Reduce scan frequency in scheduler configuration
-- Use cached responses where possible
+### Jellyfin shows duplicate "virtual" seasons
+→ The `jellyfin_virtual_cleanup` job removes them after each Jellyfin scan. To look at
+one series, use `GET /api/jellyfin/virtual-items?series_id=<id>`.
 
-### Crunchyroll API breaking changes
-- Check `_resources/Research/CrunchyrollApi.md` for latest notes
-- Test authentication flow manually
-- Compare against Crunchyroll-Anilist-Sync reference implementation
+### The container does not start
+→ Read `docker logs AnilistLink` first.
+→ Make sure that port 9876 is free: `lsof -i :9876`.
 
----
+## Project links
 
-## Quick Wins
-
-1. **Set up git alias**: `git config --global alias.pr 'pull --rebase'`
-2. **Create docs structure**: `mkdir -p docs _resources/{Examples,Research,Assets,Notes}`
-3. **Verify ARCHITECTURE.md**: Ensure system design is documented
-4. **Set up _resources/**: Add to .gitignore, store API samples
-5. **Verify CLAUDE.md symlink**: `ls -la CLAUDE.md` → `docs/CLAUDE.md`
-6. **Implement Binhex Docker standards**: Use `/config`, `/data` + `PUID`/`PGID`
-7. **Enable auto-accept**: Speed up workflow once confident
-8. **Use planning mode**: For complex features like new platform integrations
-9. **Add .dockerignore**: Instant build time improvement
-10. **Multi-stage Docker**: Smaller images for production
-11. **Set UMASK=002**: Prevent permission issues
-12. **Check supervisord.log**: First place to look when debugging containers
-
----
-
-## Resources
-
-- Claude Code Docs: https://docs.claude.com/en/docs/claude-code
-- AniList API Docs: https://anilist.gitbook.io/anilist-apiv2-docs
-- Plex API Wiki: https://github.com/Arcanemagus/plex-api/wiki
-- Jellyfin API Docs: https://api.jellyfin.org/
-- rapidfuzz Docs: https://rapidfuzz.github.io/RapidFuzz/
-- Existing Crunchyroll Sync: https://github.com/Mprice12337/Crunchyroll-Anilist-Sync
-
----
-
-**Pro Tip**: The most important thing is your `CLAUDE.md` file. Invest time in making it comprehensive, and Claude will work much more effectively with your codebase.
+- [Architecture](ARCHITECTURE.md)
+- [Dev setup](DEV-SETUP.md)
+- [Issues](https://github.com/AnotherMike-exe/Anilist-Link/issues)

@@ -210,10 +210,16 @@ class TitleMatcher:
     # Title similarity (ported verbatim from AnimeMatcher)
     # ------------------------------------------------------------------
 
+    @staticmethod
     def calculate_title_similarity(
-        self, target_title: str, candidate: dict[str, Any]
+        target_title: str, candidate: dict[str, Any]
     ) -> float:
-        """Calculate similarity score between *target_title* and a candidate entry."""
+        """Calculate similarity score between *target_title* and a candidate entry.
+
+        Static so the season-mapping helpers can score titles without an
+        instance; instance calls (``self._matcher.calculate_title_similarity``)
+        are unaffected.
+        """
         target_normalized = normalize_title(target_title)
         target_base = extract_base_title(target_normalized)
         target_no_space = target_normalized.replace(" ", "")
@@ -400,65 +406,110 @@ class TitleMatcher:
                     "release_order": release_order,
                     "title": get_primary_title(result),
                     "episodes": result.get("episodes", 0),
-                    "has_explicit_season": _has_explicit_season_number(result),
                     "is_space_removed_match": is_space_removed_match,
                 }
             )
 
         tv_series.sort(key=lambda x: x["release_order"])
 
-        season_num = 1
+        # Bucket entries by (season, cour). A franchise's cours share a season
+        # number: Crunchyroll numbers seasons the way AniList labels them
+        # ("Nth Season" / a Roman numeral), and a bare "Part N" is a cour of
+        # the season its siblings belong to, not a season of its own.
+        buckets: dict[int, dict[int, dict[str, Any]]] = {}
+        implicit_next = 1
+        last_season = 1
+
         for series_data in tv_series:
             result = series_data["entry"]
+            parsed_season, cour = parse_season_and_cour(result)
 
-            detected_season = _detect_season_from_anilist_entry(result, base_title)
-
-            if series_data["has_explicit_season"] and detected_season > 1:
-                actual_season = detected_season
+            if parsed_season is None:
+                if cour > 1:
+                    # A continuation cour with no season marker of its own
+                    # ("Mushoku Tensei: … Part 2") belongs to the season the
+                    # previous entry established.
+                    season = last_season
+                else:
+                    while implicit_next in buckets:
+                        implicit_next += 1
+                    season = implicit_next
+                    implicit_next += 1
             else:
-                actual_season = season_num
-                season_num += 1
+                season = parsed_season
+
+            last_season = season
 
             sim = self.calculate_title_similarity(series_title, result)
             if series_data["is_space_removed_match"]:
                 sim += 0.3
 
-            # Decide whether to add or replace this season slot
-            should_add = False
-            current_format = result.get("format", "").upper()
+            cour_data = {
+                "entry": result,
+                "episodes": series_data["episodes"],
+                "title": series_data["title"],
+                "similarity": sim,
+                "id": result["id"],
+                "release_order": series_data["release_order"],
+                "cour": cour,
+            }
 
-            if actual_season not in season_structure:
-                should_add = True
-            else:
-                existing_entry = season_structure[actual_season]["entry"]
-                existing_format = existing_entry.get("format", "").upper()
+            season_bucket = buckets.setdefault(season, {})
+            existing = season_bucket.get(cour)
 
-                if current_format == "TV" and existing_format == "ONA":
-                    should_add = True
-                    logger.debug("Replacing ONA with TV for Season %d", actual_season)
-                elif current_format == existing_format and sim > season_structure[
-                    actual_season
-                ].get("similarity", 0):
-                    should_add = True
-                    logger.debug(
-                        "Replacing with higher similarity entry for Season %d",
-                        actual_season,
-                    )
+            if existing is None:
+                season_bucket[cour] = cour_data
+                continue
 
-            if should_add:
-                season_structure[actual_season] = {
-                    "entry": result,
-                    "episodes": series_data["episodes"],
-                    "title": series_data["title"],
-                    "similarity": sim,
-                    "id": result["id"],
-                    "release_order": series_data["release_order"],
-                }
+            # Same season *and* same cour — two AniList listings of one
+            # broadcast (e.g. an ONA entry and a TV entry). Keep the better.
+            current_format = (result.get("format", "") or "").upper()
+            existing_format = (existing["entry"].get("format", "") or "").upper()
+
+            if current_format == "TV" and existing_format == "ONA":
+                season_bucket[cour] = cour_data
                 logger.debug(
-                    "  Season %d: %s (%s episodes)",
-                    actual_season,
-                    series_data["title"],
-                    series_data["episodes"],
+                    "Replacing ONA with TV for Season %d cour %d", season, cour
+                )
+            elif current_format == existing_format and sim > existing.get(
+                "similarity", 0
+            ):
+                season_bucket[cour] = cour_data
+                logger.debug(
+                    "Replacing with higher similarity entry for Season %d cour %d",
+                    season,
+                    cour,
+                )
+
+        # Flatten buckets into the season structure. Each season keeps its cours
+        # in order; the season's episode count is the total across them (or None
+        # when any cour is still airing), and the first cour stays the season's
+        # representative entry.
+        for season in sorted(buckets):
+            cours = [buckets[season][c] for c in sorted(buckets[season])]
+            total = _season_episode_total(cours)
+            first = cours[0]
+            season_structure[season] = {
+                "entry": first["entry"],
+                "episodes": total,
+                "title": first["title"],
+                "similarity": max(c.get("similarity", 0) for c in cours),
+                "id": first["id"],
+                "release_order": first["release_order"],
+                "cours": cours,
+            }
+            if len(cours) == 1:
+                logger.debug(
+                    "  Season %d: %s (%s episodes)", season, first["title"], total
+                )
+            else:
+                logger.debug(
+                    "  Season %d: %s (%s episodes across %d cours: %s)",
+                    season,
+                    first["title"],
+                    total,
+                    len(cours),
+                    ", ".join("%s (%s)" % (c["title"], c["episodes"]) for c in cours),
                 )
 
         # Fallback: include TV entries if structure is empty
@@ -529,8 +580,13 @@ class TitleMatcher:
         cr_season: int,
         cr_episode: int,
         season_structure: dict[int, dict[str, Any]],
+        cr_season_title: str = "",
     ) -> tuple[dict[str, Any] | None, int, int]:
         """Map a CR season+episode to the correct AniList entry.
+
+        When ``cr_season_title`` identifies a season unambiguously it overrides
+        ``cr_season``, because CR's season numbers count movies and arcs that
+        AniList lists separately and so drift out of step with it.
 
         Detects absolute-episode numbering (where CR reports a running count
         across seasons rather than per-season) and converts to per-season.
@@ -542,21 +598,34 @@ class TitleMatcher:
         if not season_structure:
             return None, 0, 0
 
+        titled_season = season_from_cr_season_title(cr_season_title, season_structure)
+        if titled_season is not None and titled_season != cr_season:
+            logger.info(
+                "%s: Crunchyroll season %d is AniList season %d by title (%r)",
+                series_title,
+                cr_season,
+                titled_season,
+                cr_season_title,
+            )
+            cr_season = titled_season
+
         sorted_seasons = sorted(season_structure.keys())
 
         target_season_eps: int | None = None
         if cr_season in season_structure:
-            target_season_eps = season_structure[cr_season].get("episodes")
+            target_season_eps = _season_episode_total(
+                _season_cours(season_structure[cr_season])
+            )
 
         earlier_seasons_total = sum(
-            (season_structure[sn].get("episodes") or 0)
+            (_season_episode_total(_season_cours(season_structure[sn])) or 0)
             for sn in sorted_seasons
             if sn < cr_season
         )
 
         # Detect absolute numbering:
-        # - cr_episode exceeds the target season's known max, or
-        # - target season eps unknown but cr_episode exceeds all earlier known seasons
+        # - cr_episode exceeds the target season's known total, or
+        # - target season total unknown but cr_episode exceeds all earlier ones
         is_absolute = False
         if target_season_eps and cr_episode > target_season_eps:
             is_absolute = True
@@ -570,55 +639,78 @@ class TitleMatcher:
         if is_absolute:
             cumulative = 0
             for sn in sorted_seasons:
-                sd = season_structure[sn]
-                season_eps = sd.get("episodes")
+                cours = _season_cours(season_structure[sn])
+                season_eps = _season_episode_total(cours)
 
-                if season_eps:
-                    if cr_episode <= cumulative + season_eps:
-                        episode_in_season = cr_episode - cumulative
-                        if episode_in_season > 0:
-                            logger.info(
-                                "Episode %d (absolute) maps to S%dE%d",
-                                cr_episode,
-                                sn,
-                                episode_in_season,
-                            )
-                            return sd["entry"], sn, episode_in_season
-                    cumulative += season_eps
-                else:
-                    # Unknown episode count — allocate the remainder here.
-                    episode_in_season = cr_episode - cumulative
-                    if episode_in_season > 0:
-                        logger.info(
-                            "Episode %d (absolute) maps to S%dE%d "
-                            "(unknown season size)",
-                            cr_episode,
-                            sn,
-                            episode_in_season,
-                        )
-                        return sd["entry"], sn, episode_in_season
+                episode_in_season = cr_episode - cumulative
+                if season_eps is not None:
+                    # This season is fully known — skip past it if the episode
+                    # lands beyond its end.
+                    if cr_episode > cumulative + season_eps:
+                        cumulative += season_eps
+                        continue
+                    if episode_in_season <= 0:
+                        cumulative += season_eps
+                        continue
+                elif episode_in_season <= 0:
+                    continue
 
-        # Direct season lookup
-        if cr_season in season_structure:
-            sd = season_structure[cr_season]
-            if target_season_eps:
-                capped_episode = min(cr_episode, target_season_eps)
-                if cr_episode > target_season_eps:
-                    logger.warning(
-                        "Could not map episode %d, using S%dE%d",
+                # Sanity-check the absolute hypothesis before trusting it.
+                # Crunchyroll would not file an episode under season N and mean
+                # an episode of an *earlier* season, so a result that resolves
+                # before cr_season disproves the hypothesis rather than
+                # confirming it. Demon Slayer season 5 episode 11 (against an
+                # 8-episode season 5) resolved to season 1 episode 11 this way
+                # and proposed writing progress to the wrong entry.
+                if cr_season > sn:
+                    logger.debug(
+                        "Rejecting absolute reading of episode %d: it resolves "
+                        "to S%dE%d, earlier than the reported season %d",
                         cr_episode,
+                        sn,
+                        episode_in_season,
                         cr_season,
-                        capped_episode,
                     )
-                return sd["entry"], cr_season, capped_episode
-            return sd["entry"], cr_season, cr_episode
+                    break
 
-        # Season 1 fallback
-        if 1 in season_structure:
-            sd = season_structure[1]
-            logger.warning("Falling back to Season 1 for %s", series_title)
-            return sd["entry"], 1, cr_episode
+                entry, episode = _resolve_within_cours(cours, episode_in_season)
+                logger.info(
+                    "Episode %d (absolute) maps to S%dE%d%s",
+                    cr_episode,
+                    sn,
+                    episode,
+                    " (unknown season size)" if season_eps is None else "",
+                )
+                return entry, sn, episode
 
+        # Direct season lookup — resolve the episode against the season's cours
+        if cr_season in season_structure:
+            cours = _season_cours(season_structure[cr_season])
+            if target_season_eps and cr_episode > target_season_eps:
+                logger.warning(
+                    "Could not map episode %d, using S%dE%d",
+                    cr_episode,
+                    cr_season,
+                    target_season_eps,
+                )
+                entry, episode = _resolve_within_cours(cours, target_season_eps)
+                return entry, cr_season, episode
+            entry, episode = _resolve_within_cours(cours, cr_episode)
+            return entry, cr_season, episode
+
+        # No slot for this CR season, and the episode number did not resolve as
+        # absolute either. Folding it onto Season 1 (the previous behaviour)
+        # writes a later season's episode number onto the Season 1 AniList
+        # entry — Mushoku Tensei season 3 episode 10 landed on entry 108465
+        # (season 1, 11 episodes) and would have marked season 1 COMPLETED.
+        # Reporting no match is always safer than updating the wrong entry.
+        logger.warning(
+            "No AniList entry for %s season %d (season map covers seasons %s) "
+            "— refusing to fall back to Season 1",
+            series_title,
+            cr_season,
+            ", ".join(str(sn) for sn in sorted_seasons),
+        )
         return None, 0, 0
 
 
@@ -708,58 +800,159 @@ def _roman_to_int(match: re.Match[str]) -> int:
     return roman_map.get(match.group(1), 1)
 
 
-def _has_explicit_season_number(entry: dict[str, Any]) -> bool:
-    """Check if entry has explicit season number in title."""
-    title_obj = entry.get("title", {})
-    romaji = title_obj.get("romaji", "")
-    english = title_obj.get("english", "")
+_ROMAN_SEASONS = {"II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6}
 
-    patterns = [
-        r"(\d+)(?:st|nd|rd|th)\s+Season",
-        r"Season\s+(\d+)",
-        r"\bPart\s+(\d+)",
-        r"\b(?:II|III|IV|V|VI)\b",
-    ]
+_SEASON_PATTERNS: list[str] = [
+    r"\b(?:II|III|IV|V|VI)\b",
+    r"(\d+)(?:st|nd|rd|th)\s+Season",
+    r"Season\s+(\d+)",
+]
 
-    for title in [romaji, english]:
-        if title:
-            for pattern in patterns:
-                if re.search(pattern, title, re.IGNORECASE):
-                    return True
-
-    return False
+_COUR_PATTERNS: list[str] = [
+    r"\bPart\s+(\d+)",
+    r"\bCour\s+(\d+)",
+]
 
 
-def _detect_season_from_anilist_entry(entry: dict[str, Any], base_title: str) -> int:
-    """Detect which season number an AniList entry represents."""
-    title_obj = entry.get("title", {})
-    romaji = title_obj.get("romaji", "")
-    english = title_obj.get("english", "")
+def parse_season_and_cour(entry: dict[str, Any]) -> tuple[int | None, int]:
+    """Split an AniList entry's title into (season, cour).
 
-    for title in [romaji, english]:
+    A Roman numeral or an "Nth Season" / "Season N" marker names the *season*;
+    a bare "Part N" / "Cour N" names a *cour within* that season. The two are
+    independent, so "Mushoku Tensei II: Isekai Ittara Honki Dasu Part 2" is
+    season 2, cour 2 — not season 2 by virtue of its "Part 2".
+
+    ``season`` is ``None`` when the title carries no season marker at all, which
+    the caller resolves positionally: a cour-1 entry starts a new season, and a
+    later cour attaches to the season already in progress.
+    """
+    title_obj = entry.get("title", {}) or {}
+    titles = [title_obj.get("romaji") or "", title_obj.get("english") or ""]
+
+    season: int | None = None
+    cour = 1
+
+    for title in titles:
         if not title:
             continue
-
-        patterns: list[tuple[str, int]] = [
-            (r"(\d+)(?:st|nd|rd|th)\s+Season", 1),
-            (r"Season\s+(\d+)", 1),
-            (r"\bPart\s+(\d+)", 1),
-            (r"\b(?:II|III|IV|V|VI)\b", 0),
-        ]
-
-        for pattern, group in patterns:
-            match = re.search(pattern, title, re.IGNORECASE)
-            if match:
-                if group == 0:
-                    roman_map = {"II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6}
-                    return roman_map.get(match.group(0), 1)
+        if season is None:
+            for pattern in _SEASON_PATTERNS:
+                match = re.search(pattern, title, re.IGNORECASE)
+                if not match:
+                    continue
+                if match.groups():
+                    season = int(match.group(1))
                 else:
-                    return int(match.group(group))
+                    season = _ROMAN_SEASONS.get(match.group(0).upper())
+                if season is not None:
+                    break
+        if cour == 1:
+            for pattern in _COUR_PATTERNS:
+                match = re.search(pattern, title, re.IGNORECASE)
+                if match:
+                    cour = int(match.group(1))
+                    break
 
-    base_clean = base_title.lower().strip()
-    title_clean = romaji.lower().strip()
+    return season, cour
 
-    if base_clean in title_clean and title_clean == base_clean:
-        return 1
 
-    return 1
+# A CR season title must match an AniList title this closely before it is
+# allowed to override CR's own season number. The scorer floors any
+# substring-containment pair at 0.90, so 0.95 means "near-exact on some title of
+# that entry" rather than merely "one title contains the other" — which is what
+# keeps a movie arc absent from the TV map (Demon Slayer's Infinity Castle) from
+# being folded onto season 1.
+_CR_SEASON_TITLE_MIN_SIMILARITY = 0.95
+
+
+def season_from_cr_season_title(
+    cr_season_title: str, season_structure: dict[int, dict[str, Any]]
+) -> int | None:
+    """Identify a season from the season title Crunchyroll reports, if it can.
+
+    Crunchyroll's season *numbers* count everything it lists for a franchise,
+    including movies and arcs AniList publishes as separate entries, so the two
+    numbering schemes drift apart. Demon Slayer is the clearest case: CR reports
+    seasons up to 7 for a franchise AniList models as 5 TV entries, so CR's
+    "season 5" is not AniList's season 5 at all.
+
+    The season *title* has no such problem — CR's arc names line up with AniList's
+    English titles ("… Hashira Training Arc" ↔ ``Kimetsu no Yaiba: Hashira
+    Geiko-hen``) — so when one season matches near-exactly and unambiguously, it
+    is a better answer than the number.
+
+    Returns the season number, or ``None`` when the title is missing, generic, or
+    matches nothing clearly enough to act on. Callers keep CR's own number then.
+    """
+    if not cr_season_title or not cr_season_title.strip():
+        return None
+
+    best_season: int | None = None
+    best_score = 0.0
+    runner_up = 0.0
+
+    for season, season_data in season_structure.items():
+        season_best = 0.0
+        for cour in _season_cours(season_data):
+            entry = cour.get("entry")
+            if not entry:
+                continue
+            season_best = max(
+                season_best,
+                TitleMatcher.calculate_title_similarity(cr_season_title, entry),
+            )
+        if season_best > best_score:
+            runner_up = best_score
+            best_score = season_best
+            best_season = season
+        elif season_best > runner_up:
+            runner_up = season_best
+
+    if best_season is None or best_score < _CR_SEASON_TITLE_MIN_SIMILARITY:
+        return None
+    if best_score <= runner_up:
+        # Two seasons match equally well — the title does not discriminate.
+        return None
+    return best_season
+
+
+def _season_cours(season_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return a season's cours, treating a legacy single-entry season as one."""
+    cours = season_data.get("cours")
+    if cours:
+        return list(cours)
+    return [season_data]
+
+
+def _season_episode_total(cours: list[dict[str, Any]]) -> int | None:
+    """Total episodes across a season's cours, or None if any is still unknown."""
+    total = 0
+    for cour in cours:
+        episodes = cour.get("episodes")
+        if not episodes:
+            return None
+        total += episodes
+    return total
+
+
+def _resolve_within_cours(
+    cours: list[dict[str, Any]], episode_in_season: int
+) -> tuple[dict[str, Any], int]:
+    """Map a per-season episode number onto the cour that actually contains it.
+
+    Crunchyroll numbers episodes continuously across a season's cours, so
+    season 2 episode 20 of a 13+12 split is cour 2 episode 7.
+    """
+    cumulative = 0
+    for cour in cours:
+        episodes = cour.get("episodes")
+        if not episodes:
+            # Still airing — the remainder belongs here.
+            return cour["entry"], max(episode_in_season - cumulative, 1)
+        if episode_in_season <= cumulative + episodes:
+            return cour["entry"], episode_in_season - cumulative
+        cumulative += episodes
+
+    # Past the end of the known cours — cap at the final cour's last episode.
+    last = cours[-1]
+    return last["entry"], last.get("episodes") or episode_in_season

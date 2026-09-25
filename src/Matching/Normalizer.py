@@ -114,7 +114,12 @@ def extract_base_series_title(title: str) -> str:
         r"\s*[-:]\s*.*(?:Season|Part)\s*\d+.*$",
         r"\s+(?:Season|Part)\s*\d+.*$",
         r"\s+\d+(?:st|nd|rd|th)\s+Season.*$",
-        r"\s+(?:II|III|IV|V|VI)(?:\s|$).*$",
+        # Lookahead (not a consuming group) so a Roman-numeral season marker
+        # is also stripped when a subtitle follows it directly:
+        # "Mushoku Tensei II: Isekai Ittara Honki Dasu". Without the ":" branch
+        # the colon split below leaves "Mushoku Tensei II", which lands the
+        # sequel in a different series group from "Mushoku Tensei".
+        r"\s+(?:II|III|IV|V|VI)(?=\s|:|$).*$",
         r"\s*[-:]\s*.*(?:Cour|Arc)\s*\d+.*$",
     ]
 
@@ -141,3 +146,54 @@ def extract_base_series_title(title: str) -> str:
             base = main_part
 
     return base.strip()
+
+
+def _split_camel_boundaries(token: str) -> list[tuple[str, str]]:
+    """Return (prefix, suffix) splits at internal lowercase→uppercase boundaries.
+
+    "ReZero" -> [("Re", "Zero")]. Used to rebuild punctuation that a
+    filesystem-safe folder name dropped.
+    """
+    return [
+        (token[: m.start() + 1], token[m.start() + 1 :])
+        for m in re.finditer(r"[a-z](?=[A-Z])", token)
+    ]
+
+
+def search_title_variants(title: str) -> list[str]:
+    """Ordered, de-duplicated search terms to try against AniList.
+
+    Media folder names cannot contain a colon, so "Re:Zero kara Hajimeru Isekai
+    Seikatsu" is stored on disk as "ReZero kara Hajimeru Isekai Seikatsu" — and
+    AniList's search returns nothing for the run-together form. Yields the
+    cleaned title first, then variants that put the missing separator back at
+    the lowercase→uppercase boundary, so a caller can retry instead of giving up.
+
+    Titles with no such boundary yield a single variant, making this safe to use
+    unconditionally.
+    """
+    base = clean_title_for_search(title)
+    variants = [base]
+
+    tokens = base.split()
+    for index, token in enumerate(tokens):
+        splits = _split_camel_boundaries(token)
+        if len(splits) != 1:
+            # No boundary, or an ambiguous multi-boundary token (e.g. an
+            # acronym) — don't guess.
+            continue
+        prefix, suffix = splits[0]
+        for separator in (" ", ":"):
+            rebuilt = list(tokens)
+            rebuilt[index] = f"{prefix}{separator}{suffix}"
+            variants.append(" ".join(rebuilt))
+        break  # Only the first such token; deeper combinations aren't worth it.
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for variant in variants:
+        key = variant.lower()
+        if variant and key not in seen:
+            seen.add(key)
+            ordered.append(variant)
+    return ordered

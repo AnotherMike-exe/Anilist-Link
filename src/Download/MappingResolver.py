@@ -14,6 +14,7 @@ from src.Clients.AnilistClient import AniListClient
 from src.Clients.RadarrClient import RadarrClient
 from src.Clients.SonarrClient import SonarrClient
 from src.Database.Connection import DatabaseManager
+from src.Utils.Config import AppConfig
 from src.Utils.NamingTranslator import (
     get_preferred_title,
     is_movie_format,
@@ -49,11 +50,68 @@ class MappingResolver:
         anilist_client: AniListClient,
         sonarr_client: SonarrClient | None = None,
         radarr_client: RadarrClient | None = None,
+        config: AppConfig | None = None,
+        app_state: object | None = None,
+        defer_path_sync: bool = False,
     ) -> None:
         self._db = db
         self._anilist = anilist_client
         self._sonarr = sonarr_client
         self._radarr = radarr_client
+        # Optional — without it the *arr path reconciliation below is skipped.
+        self._config = config
+        # Optional — lets the path sync walk the franchise chain when resolving
+        # where a movie is nested; without it the walk degrades to a flat folder.
+        self._app_state = app_state
+        # Interactive callers defer the path sync: it costs several *arr and
+        # AniList round trips, and the user's answer (added / linked) is already
+        # known without it.  They run it in the background instead.
+        self._defer_path_sync = defer_path_sync
+
+    async def _sync_arr_path(
+        self, service: str, arr_id: int | None, anilist_id: int
+    ) -> None:
+        """Point the *arr record at the entry's restructured library folder.
+
+        A series/movie that is already in Sonarr/Radarr keeps whatever path it
+        was added with.  Once the restructurer has moved the files, that path is
+        stale and the service reports everything as missing.  Linking an entry
+        here is the natural moment to close that gap.
+
+        Never moves files and never raises — a stale path is worth fixing, but
+        not at the cost of failing the add the user actually asked for.
+        """
+        if not self._config or not arr_id or self._defer_path_sync:
+            return
+        try:
+            from src.Download.ArrPostProcessor import ArrPostProcessor
+
+            processor = ArrPostProcessor(
+                db=self._db, config=self._config, app_state=self._app_state
+            )
+            if service == "sonarr":
+                result = await processor.sync_sonarr_series_path(
+                    arr_id, anilist_id, sonarr=self._sonarr
+                )
+            else:
+                result = await processor.sync_radarr_movie_path(
+                    arr_id, anilist_id, radarr=self._radarr
+                )
+            logger.debug(
+                "Path sync for %s id=%s anilist_id=%d: %s",
+                service,
+                arr_id,
+                anilist_id,
+                result.get("action"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Path sync failed for %s id=%s (anilist_id=%d): %s",
+                service,
+                arr_id,
+                anilist_id,
+                exc,
+            )
 
     async def add_to_sonarr(
         self,
@@ -97,6 +155,7 @@ class MappingResolver:
                 logger.info(
                     "Series tvdb_id=%d already in Sonarr (id=%s)", tvdb_id, arr_id
                 )
+                await self._sync_arr_path("sonarr", arr_id, anilist_id)
                 return AddResult(
                     ok=True,
                     anilist_id=anilist_id,
@@ -133,6 +192,9 @@ class MappingResolver:
                 monitor_type=stored_type,
             )
             logger.info("Added tvdb_id=%d to Sonarr as id=%s", tvdb_id, arr_id)
+            # Existing files may already sit in the library under this show's
+            # AniList folder — repoint Sonarr so they're imported, not re-grabbed.
+            await self._sync_arr_path("sonarr", arr_id, anilist_id)
             return AddResult(
                 ok=True,
                 anilist_id=anilist_id,
@@ -190,6 +252,7 @@ class MappingResolver:
                 logger.info(
                     "Movie tmdb_id=%d already in Radarr (id=%s)", tmdb_id, arr_id
                 )
+                await self._sync_arr_path("radarr", arr_id, anilist_id)
                 return AddResult(
                     ok=True,
                     anilist_id=anilist_id,
@@ -217,6 +280,7 @@ class MappingResolver:
                 monitor_type="future" if monitored else "none",
             )
             logger.info("Added tmdb_id=%d to Radarr as id=%s", tmdb_id, arr_id)
+            await self._sync_arr_path("radarr", arr_id, anilist_id)
             return AddResult(
                 ok=True,
                 anilist_id=anilist_id,
@@ -247,13 +311,17 @@ class MappingResolver:
         search_immediately: bool = False,
         tags: list[int] | None = None,
         tvdb_id_override: int | None = None,
+        tmdb_id_override: int | None = None,
         use_title_chain: bool = True,
     ) -> AddResult:
         """Resolve IDs and add entry to the appropriate *arr service."""
         title = get_preferred_title(anilist_media)
 
         if is_movie_format(anilist_format):
-            tmdb_id = await resolve_tmdb_id(anilist_id, self._anilist)
+            if tmdb_id_override:
+                tmdb_id: int | None = tmdb_id_override
+            else:
+                tmdb_id = await resolve_tmdb_id(anilist_id, self._anilist)
             if not tmdb_id:
                 logger.warning(
                     "Could not resolve TMDB ID for anilist_id=%d title=%r",
@@ -270,6 +338,8 @@ class MappingResolver:
                         f"Could not resolve TMDB ID for anilist_id={anilist_id}"
                         f" ({title!r}). Check that AniList has a TMDB external link."
                     ),
+                    needs_disambiguation=True,
+                    disambiguation_candidates=[],
                 )
             return await self.add_to_radarr(
                 anilist_id=anilist_id,

@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.responses import Response
 
 from src.Scheduler.Jobs import JOB_CRUNCHYROLL_SYNC
+from src.Utils.Version import APP_VERSION
 from src.Web.App import spawn_background_task
 from src.Web.Routes.Helpers import enrich_watchlist_entries
 
@@ -83,6 +84,7 @@ async def dashboard(
         next_sync = job_status[0].get("next_run_time")
 
     return templates.TemplateResponse(
+        request,
         "dashboard.html",
         {
             "request": request,
@@ -103,7 +105,6 @@ async def dashboard(
             "score_format": await db.get_setting("anilist.score_format") or "POINT_10",
             "error": error,
             "message": request.query_params.get("message"),
-            "version": "0.1.0",
         },
     )
 
@@ -121,7 +122,7 @@ async def api_status(request: Request) -> JSONResponse:
     return JSONResponse(
         {
             "status": "running",
-            "version": "0.1.0",
+            "version": APP_VERSION,
             "mapping_count": mapping_count,
             "user_count": user_count,
             "jobs": jobs,

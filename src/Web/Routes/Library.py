@@ -130,6 +130,7 @@ async def library_detail(request: Request, library_id: int) -> Response:
         jellyfin_matched_count = len(jellyfin_matches)
 
     return templates.TemplateResponse(
+        request,
         "library_detail.html",
         {
             "request": request,
@@ -160,6 +161,7 @@ async def library_scan_progress_page(request: Request, library_id: int) -> Respo
     library = await db.get_library(library_id)
 
     return templates.TemplateResponse(
+        request,
         "library_scan_progress.html",
         {
             "request": request,

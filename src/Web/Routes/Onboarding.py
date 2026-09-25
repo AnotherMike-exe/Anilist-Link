@@ -135,6 +135,7 @@ async def onboarding_page(request: Request) -> HTMLResponse:
     )
 
     return templates.TemplateResponse(
+        request,
         "onboarding.html",
         {
             "request": request,
@@ -145,7 +146,6 @@ async def onboarding_page(request: Request) -> HTMLResponse:
             "anilist_username": anilist_username,
             "has_plexpass": has_plexpass,
             "skip_scan_started": skip_scan_ready or skip_scan_active,
-            "version": "0.1.0",
         },
     )
 
@@ -1130,6 +1130,7 @@ async def library_scan_results_page(request: Request):  # type: ignore[return]
     unmatched_items = [r for r in results if not r.get("anilist_id")]
 
     return templates.TemplateResponse(
+        request,
         "library_scan_results.html",
         {
             "request": request,
