@@ -71,7 +71,7 @@ async def radarr_webhook(request: Request) -> JSONResponse:
 @router.get("/api/webhook/info")
 async def webhook_info(request: Request) -> JSONResponse:
     """Return the webhook URLs to register in Sonarr/Radarr."""
-    base_url = request.app.state.config.app.base_url.rstrip("/")
+    base_url = request.app.state.config.base_url.rstrip("/")
     return JSONResponse(
         {
             "sonarr": f"{base_url}/api/webhook/sonarr",
